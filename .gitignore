@@ -1,0 +1,13 @@
+deudix.db
+*.db
+*.sqlite
+__pycache__/
+*.pyc
+*.pyo
+.env
+.env.local
+config_local.py
+*.log
+.DS_Store
+Thumbs.db
+tests/__pycache__/
