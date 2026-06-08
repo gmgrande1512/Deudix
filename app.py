@@ -363,7 +363,17 @@ def pagina_individual():
                     resp = consultar_bcra(cuit_input)
 
                 if not resp["ok"]:
-                    st.error(f"Error de conexión: {resp['error']}")
+                    st.markdown(
+                        '<div style="background:#fff8f0;border:1.5px solid #cc6600;border-radius:10px;padding:20px 24px;margin:8px 0;">'
+                        '<p style="font-size:16px;font-weight:700;color:#cc6600;margin:0 0 6px 0;">⚠️ El BCRA no está disponible en este momento</p>'
+                        '<p style="font-size:14px;color:#1d1d1f;margin:0 0 8px 0;">No pudimos conectarnos con la Central de Deudores del Banco Central.</p>'
+                        '<p style="font-size:13px;color:#86868b;margin:0;">Esto suele ser temporal. Esperá unos segundos y volvé a intentar. '
+                        'Si el problema persiste, el servicio del BCRA puede estar en mantenimiento.</p>'
+                        '</div>',
+                        unsafe_allow_html=True,
+                    )
+                    if st.button("Reintentar", type="primary", key="btn_retry_bcra"):
+                        st.rerun()
                 else:
                     r           = procesar_respuesta(resp.get("data"), cuit_input)
                     ratio, res  = calcular_pasa(r["Monto_Sit1"], r["Monto_Riesgo"], umbral_ind)
@@ -453,12 +463,10 @@ def pagina_individual():
                             '</div>',
                             unsafe_allow_html=True,
                         )
-                        _vigilar = st.checkbox(
-                            "Agregar este CUIT al seguimiento mensual",
-                            key=f"chk_vigilar_{cuit_input}",
-                            help="Se generará un informe mensual si la situación crediticia cambia",
-                        )
-                        if _vigilar:
+                        # Botón en lugar de checkbox para evitar rerun antes de mostrar confirmación
+                        if st.button("👁 Agregar al seguimiento mensual",
+                                     key=f"btn_vigilar_{cuit_input}",
+                                     use_container_width=True):
                             _alias = nombre_bcra or cuit_input
                             _ok, _msg = agregar_vigilado(
                                 usuario_actual["cliente_id"],
@@ -466,16 +474,24 @@ def pagina_individual():
                                 cuit_input, _alias,
                             )
                             if _ok:
-                                st.markdown(
-                                    '<div style="background:#f0faf0;border:1.5px solid #1a7a1a;'
-                                    'border-radius:10px;padding:14px 18px;margin:4px 0;">'
-                                    '<p style="font-size:16px;font-weight:700;color:#1a7a1a;margin:0;">'
-                                    '✅ CUIT agregado al seguimiento mensual</p>'
-                                    '</div>',
-                                    unsafe_allow_html=True,
-                                )
+                                st.session_state[f"vigilado_ok_{cuit_input}"] = True
+                                st.rerun()
                             else:
                                 st.error(f"No se pudo agregar: {_msg}")
+                        # Confirmación persistente
+                        if st.session_state.get(f"vigilado_ok_{cuit_input}"):
+                            st.markdown(
+                                '<div style="background:#f0faf0;border:1.5px solid #1a7a1a;'
+                                'border-radius:10px;padding:16px 20px;margin:8px 0;text-align:center;">'
+                                '<p style="font-size:18px;font-weight:700;color:#1a7a1a;margin:0 0 4px 0;">'
+                                '✅ CUIT agregado al seguimiento mensual</p>'
+                                '<p style="font-size:13px;color:#1a7a1a;margin:0;">'
+                                'Vas a recibir alertas si su situación crediticia cambia.</p>'
+                                '</div>',
+                                unsafe_allow_html=True,
+                            )
+
+
 
                     # Mapa si hay dirección
                     if direccion_input.strip():
