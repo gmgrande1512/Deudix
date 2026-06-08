@@ -18,7 +18,12 @@ import hashlib
 from datetime import datetime
 from config import PRECIO_DEFAULT_USD
 
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "deudix.db")
+# En Streamlit Cloud /mount/src es read-only — usar /tmp que persiste en la sesion
+# En local usar la carpeta del proyecto
+_es_cloud = os.path.exists("/mount/src")
+DB_PATH = "/tmp/deudix.db" if _es_cloud else os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "deudix.db"
+)
 
 TYC_VERSION = "v1.0-2026"
 TYC_HASH    = hashlib.sha256(TYC_VERSION.encode()).hexdigest()[:12]

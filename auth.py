@@ -154,6 +154,7 @@ def login_screen():
             st.session_state["usuario"]         = usuario
             st.session_state["logueado"]        = True
             st.session_state["tyc_pendiente"]   = not usuario_acepto_tyc(usuario["id"])
+            st.query_params["sid"] = usuario["email"]
             st.rerun()
 
         r1, r2 = st.columns(2)
@@ -238,10 +239,21 @@ def tyc_screen(usuario: dict):
 def logout():
     for key in list(st.session_state.keys()):
         st.session_state.pop(key, None)
+    st.query_params.clear()
     st.rerun()
 
 def require_login():
     init_db()
+
+    # Recuperar sesión desde query_params si se perdió por F5 o reinicio
+    if not st.session_state.get("logueado"):
+        _sid = st.query_params.get("sid", "")
+        if _sid:
+            _u = get_usuario_cualquier_estado(_sid)
+            if _u and _u.get("aprobado") and _u.get("activo"):
+                st.session_state["usuario"]       = _u
+                st.session_state["logueado"]      = True
+                st.session_state["tyc_pendiente"] = not usuario_acepto_tyc(_u["id"])
 
     # Paso 1 — ¿está logueado?
     if not st.session_state.get("logueado"):
