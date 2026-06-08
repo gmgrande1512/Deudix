@@ -306,7 +306,7 @@ def pagina_individual():
                          if not ((cliente_actual or {}).get(f) or "").strip()]
             st.markdown(f'Completá los siguientes campos antes de realizar consultas: **{", ".join(faltantes)}**')
             if st.button("Completar datos de empresa →", type="primary", key="btn_goto_setup_ind"):
-                st.session_state["nav_radio"] = "Mi empresa"
+                st.session_state["_ir_a_setup"] = True
                 st.rerun()
         return
 
@@ -520,7 +520,7 @@ def pagina_masiva():
                          if not ((cliente_actual or {}).get(f) or "").strip()]
             st.markdown(f'Completá los siguientes campos antes de procesar consultas: **{", ".join(faltantes)}**')
             if st.button("Completar datos de empresa →", type="primary", key="btn_goto_setup_mas"):
-                st.session_state["nav_radio"] = "Mi empresa"
+                st.session_state["_ir_a_setup"] = True
                 st.rerun()
         return
 
@@ -1481,6 +1481,11 @@ _router = {
     "Mi empresa":  lambda: render_setup(usuario_actual),
     "Back Office": lambda: render_admin(usuario_actual) if es_admin else pagina_individual(),
 }
+
+# Redirección a Mi empresa
+if st.session_state.pop("_ir_a_setup", False):
+    render_setup(usuario_actual)
+    st.stop()
 
 fn = _router.get(pagina)
 if fn:
