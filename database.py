@@ -4,13 +4,6 @@ database.py — Gestión de base de datos SQLite para Deudix
 Principio de privacidad (Ley 25.326 Argentina):
   Deudix no almacena datos de las personas consultadas.
   Solo se registran métricas operacionales propias del servicio.
-
-Tablas:
-  clientes              — empresas cliente con perfil completo y logo
-  usuarios              — operadores de cada empresa
-  aceptaciones_tyc      — registro de aceptación de TyC
-  eventos_masivos       — una fila por corrida batch (totales, sin CUITs)
-  eventos_individuales  — una fila por consulta puntual (sin CUIT)
 """
 import sqlite3
 import os
@@ -18,8 +11,6 @@ import hashlib
 from datetime import datetime
 from config import PRECIO_DEFAULT_USD
 
-# En Streamlit Cloud /mount/src es read-only — usar /tmp que persiste en la sesion
-# En local usar la carpeta del proyecto
 _es_cloud = os.path.exists("/mount/src")
 DB_PATH = "/tmp/deudix.db" if _es_cloud else os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "deudix.db"
@@ -37,10 +28,6 @@ def init_db():
     conn = get_conn()
     c = conn.cursor()
 
-    # ── clientes ──────────────────────────────────────────────────────────────
-    # email         = email administrativo / de contacto interno Deudix
-    # email_empresa = email público de la empresa (va en reportes y PDF)
-    # logo_bytes    = imagen PNG/JPG guardada como BLOB
     c.execute("""
         CREATE TABLE IF NOT EXISTS clientes (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -51,7 +38,6 @@ def init_db():
             activo          INTEGER DEFAULT 1,
             fecha_alta      TEXT    DEFAULT (datetime('now','localtime')),
             notas           TEXT,
-            -- perfil empresa
             razon_social    TEXT,
             cuit_empresa    TEXT,
             domicilio       TEXT,
@@ -63,7 +49,6 @@ def init_db():
         )
     """)
 
-    # Migraciones: agregar columnas nuevas si la tabla ya existía
     columnas_nuevas = [
         ("email_empresa", "TEXT"),
         ("razon_social",  "TEXT"),
@@ -80,7 +65,6 @@ def init_db():
         if col not in cols_existentes:
             c.execute(f"ALTER TABLE clientes ADD COLUMN {col} {tipo}")
 
-    # ── usuarios ──────────────────────────────────────────────────────────────
     c.execute("""
         CREATE TABLE IF NOT EXISTS usuarios (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -96,13 +80,11 @@ def init_db():
         )
     """)
 
-    # Migración: aprobado
     _cols_u = {r[1] for r in c.execute("PRAGMA table_info(usuarios)").fetchall()}
     if "aprobado" not in _cols_u:
         c.execute("ALTER TABLE usuarios ADD COLUMN aprobado INTEGER DEFAULT 0")
         c.execute("UPDATE usuarios SET aprobado=1 WHERE rol='admin'")
 
-    # ── aceptaciones_tyc ─────────────────────────────────────────────────────
     c.execute("""
         CREATE TABLE IF NOT EXISTS aceptaciones_tyc (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -115,7 +97,6 @@ def init_db():
         )
     """)
 
-    # ── eventos_masivos ───────────────────────────────────────────────────────
     c.execute("""
         CREATE TABLE IF NOT EXISTS eventos_masivos (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -133,7 +114,6 @@ def init_db():
         )
     """)
 
-    # ── eventos_individuales ──────────────────────────────────────────────────
     c.execute("""
         CREATE TABLE IF NOT EXISTS eventos_individuales (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -146,8 +126,6 @@ def init_db():
         )
     """)
 
-    # ── saldos ───────────────────────────────────────────────────────────────
-    # Un registro por cliente. saldo_usd es el saldo disponible actual.
     c.execute("""
         CREATE TABLE IF NOT EXISTS saldos (
             cliente_id      INTEGER PRIMARY KEY REFERENCES clientes(id),
@@ -156,10 +134,6 @@ def init_db():
         )
     """)
 
-    # ── movimientos_saldo ─────────────────────────────────────────────────────
-    # Historial completo de recargas y consumos.
-    # tipo: 'recarga' | 'consumo' | 'ajuste_admin' | 'reembolso'
-    # estado: 'pendiente' | 'acreditado' | 'rechazado' | 'cancelado'
     c.execute("""
         CREATE TABLE IF NOT EXISTS movimientos_saldo (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -177,9 +151,6 @@ def init_db():
         )
     """)
 
-
-    # ── vigilados ─────────────────────────────────────────────────────────────
-    # CUITs/CUILs que el cliente quiere monitorear mes a mes.
     c.execute("""
         CREATE TABLE IF NOT EXISTS vigilados (
             id               INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -195,14 +166,10 @@ def init_db():
         )
     """)
 
-    # Migración: agregar umbral_pct si ya existía la tabla sin ese campo
     _cols_v = {r[1] for r in c.execute("PRAGMA table_info(vigilados)").fetchall()}
     if "umbral_pct" not in _cols_v:
         c.execute("ALTER TABLE vigilados ADD COLUMN umbral_pct REAL DEFAULT 40.0")
 
-    # ── historial_vigilados ───────────────────────────────────────────────────
-    # Un registro por (vigilado, periodo). Guarda la foto del mes y la variación.
-    # variacion: 'NUEVO' | 'SIN_CAMBIO' | 'SUBE' | 'BAJA' | 'DESAPARECE' | 'ERROR'
     c.execute("""
         CREATE TABLE IF NOT EXISTS historial_vigilados (
             id               INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -223,8 +190,6 @@ def init_db():
         )
     """)
 
-    # ── reportes_seguimiento ─────────────────────────────────────────────────
-    # Guarda el PDF generado en cada ejecución mensual del seguimiento.
     c.execute("""
         CREATE TABLE IF NOT EXISTS reportes_seguimiento (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -241,7 +206,6 @@ def init_db():
         )
     """)
 
-    # ── log de migraciones ────────────────────────────────────────────────────
     c.execute("""
         CREATE TABLE IF NOT EXISTS _migracion_log (
             id    INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -253,7 +217,6 @@ def init_db():
         c.execute("DROP TABLE consultas")
         c.execute("INSERT INTO _migracion_log (accion) VALUES ('tabla consultas eliminada — migración privacidad')")
 
-    # ── Admin por defecto ─────────────────────────────────────────────────────
     c.execute("SELECT COUNT(*) FROM clientes WHERE id=1")
     if c.fetchone()[0] == 0:
         c.execute("""
@@ -280,7 +243,6 @@ def get_usuario(email: str, solo_aprobados: bool = True):
     u = conn.execute(f"SELECT * FROM usuarios WHERE email=? {filtro}", (email,)).fetchone()
     conn.close()
     return dict(u) if u else None
-
 
 def get_usuario_cualquier_estado(email: str):
     conn = get_conn()
@@ -325,7 +287,6 @@ def listar_usuarios():
 
 def listar_clientes():
     conn = get_conn()
-    # No retornamos logo_bytes en el listado (pesado) — solo en get_cliente
     rows = conn.execute("""
         SELECT id, nombre, email, email_empresa, precio_consulta, activo,
                fecha_alta, notas, razon_social, cuit_empresa,
@@ -336,7 +297,6 @@ def listar_clientes():
     return [dict(r) for r in rows]
 
 def get_cliente(cliente_id: int) -> dict:
-    """Devuelve el cliente completo incluyendo logo_bytes."""
     conn = get_conn()
     row = conn.execute("SELECT * FROM clientes WHERE id=?", (cliente_id,)).fetchone()
     conn.close()
@@ -363,14 +323,17 @@ def crear_cliente(nombre, email, precio_consulta, notas="",
 
 def actualizar_perfil_cliente(cliente_id: int, datos: dict):
     """
-    Actualiza campos de perfil de empresa.
-    datos: dict con cualquier subconjunto de campos editables.
-    logo_bytes se maneja por separado con actualizar_logo_cliente().
+    BUG 5 FIX: email tiene restricción UNIQUE. Si se intenta actualizar con un email
+    ya usado por otro cliente, SQLite lanza IntegrityError.
+    Solución: excluir 'email' de la actualización por perfil (el email administrativo
+    no debería cambiarse por este formulario — es el campo UNIQUE de login del cliente).
+    Solo se actualiza si el valor cambió o es distinto del actual.
     """
     campos_permitidos = {
-        "nombre", "email", "email_empresa", "precio_consulta", "notas",
+        "nombre", "email_empresa", "precio_consulta", "notas",
         "razon_social", "cuit_empresa", "domicilio", "ciudad",
         "provincia", "telefono", "web",
+        # "email" excluido: campo UNIQUE, se maneja por separado si hace falta
     }
     sets  = []
     vals  = []
@@ -382,9 +345,14 @@ def actualizar_perfil_cliente(cliente_id: int, datos: dict):
         return
     vals.append(cliente_id)
     conn = get_conn()
-    conn.execute(f"UPDATE clientes SET {', '.join(sets)} WHERE id=?", vals)
-    conn.commit()
-    conn.close()
+    try:
+        conn.execute(f"UPDATE clientes SET {', '.join(sets)} WHERE id=?", vals)
+        conn.commit()
+    except sqlite3.IntegrityError as e:
+        conn.rollback()
+        raise sqlite3.IntegrityError(f"Error al guardar datos: {e}") from e
+    finally:
+        conn.close()
 
 def actualizar_logo_cliente(cliente_id: int, logo_bytes: bytes):
     conn = get_conn()
@@ -455,7 +423,6 @@ def registrar_evento_individual(usuario_id, cliente_id, resultado_cat):
     """, (usuario_id, cliente_id, resultado_cat, precio, precio))
     conn.commit()
     conn.close()
-    # Descontar del saldo (sin bloquear si no hay saldo — se registra igual)
     consumir_saldo(cliente_id, usuario_id, 1, "Consulta individual")
 
 def registrar_evento_masivo(usuario_id, cliente_id, resultados: list, umbral: float):
@@ -485,7 +452,6 @@ def registrar_evento_masivo(usuario_id, cliente_id, resultados: list, umbral: fl
           errores, sin_deuda, costo_total, precio_unit, umbral))
     conn.commit()
     conn.close()
-    # Descontar del saldo por los casos válidos procesados
     if casos_validos > 0:
         consumir_saldo(cliente_id, usuario_id, casos_validos,
                        f"Carga masiva — {casos_validos} casos")
@@ -577,117 +543,126 @@ def get_eventos_periodo(cliente_id=None, anio=None, mes=None) -> dict:
     }
 
 def get_actividad_diaria(dias=7, cliente_id=None) -> list:
-    conn    = get_conn()
-    filtro  = "AND cliente_id=?" if cliente_id else ""
-    params  = (f"-{dias} days", cliente_id, f"-{dias} days", cliente_id) if cliente_id else (f"-{dias} days", f"-{dias} days")
-    rows = conn.execute(f"""
-        SELECT dia, SUM(n) AS n FROM (
-            SELECT date(fecha_hora) AS dia, COUNT(*) AS n
-            FROM eventos_individuales
-            WHERE fecha_hora >= date('now', ?) {filtro}
-            GROUP BY dia
-            UNION ALL
-            SELECT date(fecha_hora) AS dia, SUM(total_casos) AS n
-            FROM eventos_masivos
-            WHERE fecha_hora >= date('now', ?) {filtro}
-            GROUP BY dia
-        ) GROUP BY dia ORDER BY dia
-    """, params).fetchall()
+    """BUG FIX: parámetros correctos para queries con y sin cliente_id."""
+    conn = get_conn()
+    rango = f"-{dias} days"
+    if cliente_id:
+        rows = conn.execute("""
+            SELECT dia, SUM(n) AS n FROM (
+                SELECT date(fecha_hora) AS dia, COUNT(*) AS n
+                FROM eventos_individuales
+                WHERE fecha_hora >= date('now', ?) AND cliente_id=?
+                GROUP BY dia
+                UNION ALL
+                SELECT date(fecha_hora) AS dia, SUM(total_casos) AS n
+                FROM eventos_masivos
+                WHERE fecha_hora >= date('now', ?) AND cliente_id=?
+                GROUP BY dia
+            ) GROUP BY dia ORDER BY dia
+        """, (rango, cliente_id, rango, cliente_id)).fetchall()
+    else:
+        rows = conn.execute("""
+            SELECT dia, SUM(n) AS n FROM (
+                SELECT date(fecha_hora) AS dia, COUNT(*) AS n
+                FROM eventos_individuales
+                WHERE fecha_hora >= date('now', ?)
+                GROUP BY dia
+                UNION ALL
+                SELECT date(fecha_hora) AS dia, SUM(total_casos) AS n
+                FROM eventos_masivos
+                WHERE fecha_hora >= date('now', ?)
+                GROUP BY dia
+            ) GROUP BY dia ORDER BY dia
+        """, (rango, rango)).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
 def get_top_clientes(periodo: str, limite=8) -> list:
     conn = get_conn()
     rows = conn.execute("""
-        SELECT cliente, SUM(consultas) AS consultas, SUM(costo) AS costo FROM (
-            SELECT cl.nombre AS cliente, COUNT(*) AS consultas, COALESCE(SUM(e.costo),0) AS costo
-            FROM eventos_individuales e JOIN clientes cl ON e.cliente_id=cl.id
-            WHERE strftime('%Y-%m', e.fecha_hora)=? GROUP BY e.cliente_id
-            UNION ALL
-            SELECT cl.nombre AS cliente, SUM(e.total_casos) AS consultas, COALESCE(SUM(e.costo_total),0) AS costo
-            FROM eventos_masivos e JOIN clientes cl ON e.cliente_id=cl.id
-            WHERE strftime('%Y-%m', e.fecha_hora)=? GROUP BY e.cliente_id
-        ) GROUP BY cliente ORDER BY consultas DESC LIMIT ?
+        SELECT cl.nombre AS cliente,
+               COALESCE(SUM(e.total_casos),0) + COUNT(DISTINCT ei.id) AS total,
+               COALESCE(SUM(e.costo_total),0) + COALESCE(SUM(ei.costo),0) AS costo
+        FROM clientes cl
+        LEFT JOIN eventos_masivos     e  ON e.cliente_id=cl.id  AND strftime('%Y-%m',e.fecha_hora)=?
+        LEFT JOIN eventos_individuales ei ON ei.cliente_id=cl.id AND strftime('%Y-%m',ei.fecha_hora)=?
+        GROUP BY cl.id
+        HAVING total > 0
+        ORDER BY total DESC
+        LIMIT ?
     """, (periodo, periodo, limite)).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
-# ══════════════════════════════════════════════════════════════════════════════
-# SALDO Y MOVIMIENTOS
-# ══════════════════════════════════════════════════════════════════════════════
+# ── Saldos ────────────────────────────────────────────────────────────────────
 
-def get_saldo(cliente_id: int) -> float:
-    """Devuelve el saldo disponible en USD. Crea registro si no existe."""
+def get_resumen_saldo(cliente_id: int) -> dict:
     conn = get_conn()
-    row = conn.execute(
-        "SELECT saldo_usd FROM saldos WHERE cliente_id=?", (cliente_id,)
+    row  = conn.execute(
+        "SELECT saldo_usd, actualizado FROM saldos WHERE cliente_id=?",
+        (cliente_id,)
     ).fetchone()
-    if not row:
-        conn.execute(
-            "INSERT OR IGNORE INTO saldos (cliente_id, saldo_usd) VALUES (?,0.0)",
-            (cliente_id,)
-        )
-        conn.commit()
-        conn.close()
-        return 0.0
+    precio = conn.execute(
+        "SELECT precio_consulta FROM clientes WHERE id=?", (cliente_id,)
+    ).fetchone()
     conn.close()
-    return float(row["saldo_usd"])
+    saldo      = float(row["saldo_usd"]) if row else 0.0
+    precio_u   = float(precio["precio_consulta"]) if precio else 0.0
+    consultas  = int(saldo / precio_u) if precio_u > 0 else 0
+    return {
+        "saldo_usd":       saldo,
+        "precio_consulta": precio_u,
+        "consultas_equiv": consultas,
+        "actualizado":     row["actualizado"] if row else "",
+    }
 
-
-def get_consultas_disponibles(cliente_id: int) -> int:
-    """Cuantas consultas puede hacer el cliente con su saldo actual."""
-    saldo  = get_saldo(cliente_id)
-    precio = get_precio_cliente(cliente_id) or PRECIO_DEFAULT_USD
-    if precio <= 0:
-        return 0
-    return int(saldo / precio)
-
-
-def tiene_saldo(cliente_id: int, cantidad: int = 1) -> bool:
-    """True si el cliente tiene saldo para 'cantidad' consultas."""
-    return get_consultas_disponibles(cliente_id) >= cantidad
-
-
-def _actualizar_saldo(conn, cliente_id: int, delta_usd: float):
-    """Suma o resta delta_usd al saldo. delta negativo = consumo."""
-    conn.execute(
-        "INSERT INTO saldos (cliente_id, saldo_usd, actualizado) VALUES (?,?,datetime('now','localtime'))"
-        " ON CONFLICT(cliente_id) DO UPDATE SET"
-        "   saldo_usd   = MAX(0, saldo_usd + excluded.saldo_usd),"
-        "   actualizado = excluded.actualizado",
-        (cliente_id, delta_usd)
-    )
-
+def consumir_saldo(cliente_id: int, usuario_id: int,
+                   cant_consultas: int, descripcion: str = ""):
+    conn = get_conn()
+    precio = conn.execute(
+        "SELECT precio_consulta FROM clientes WHERE id=?", (cliente_id,)
+    ).fetchone()
+    precio_u = float(precio["precio_consulta"]) if precio else 0.0
+    monto    = cant_consultas * precio_u
+    if monto <= 0:
+        conn.close()
+        return
+    conn.execute("""
+        INSERT INTO saldos (cliente_id, saldo_usd) VALUES (?, 0.0)
+        ON CONFLICT(cliente_id) DO UPDATE
+        SET saldo_usd  = MAX(0, saldo_usd - ?),
+            actualizado = datetime('now','localtime')
+    """, (cliente_id, monto))
+    conn.execute("""
+        INSERT INTO movimientos_saldo
+            (cliente_id, usuario_id, tipo, monto_usd, consultas_equiv,
+             modo_pago, estado, descripcion, fecha_acreditado)
+        VALUES (?,?,'consumo',?,?,'SISTEMA','acreditado',?,datetime('now','localtime'))
+    """, (cliente_id, usuario_id, monto, cant_consultas, descripcion))
+    conn.commit()
+    conn.close()
 
 def registrar_recarga_pendiente(cliente_id: int, usuario_id: int,
                                  monto_usd: float, referencia_ext: str,
                                  modo_pago: str = "MOCK") -> int:
-    """
-    Registra una recarga en estado 'pendiente'.
-    Retorna el id del movimiento para luego confirmar o rechazar.
-    """
-    precio   = get_precio_cliente(cliente_id) or PRECIO_DEFAULT_USD
-    equiv    = int(monto_usd / precio) if precio > 0 else 0
-    conn     = get_conn()
-    cur      = conn.execute("""
+    conn  = get_conn()
+    precio = conn.execute(
+        "SELECT precio_consulta FROM clientes WHERE id=?", (cliente_id,)
+    ).fetchone()
+    precio_u   = float(precio["precio_consulta"]) if precio else 0.0
+    consultas  = int(monto_usd / precio_u) if precio_u > 0 else 0
+    cur = conn.execute("""
         INSERT INTO movimientos_saldo
             (cliente_id, usuario_id, tipo, monto_usd, consultas_equiv,
              referencia_ext, modo_pago, estado, descripcion)
-        VALUES (?,?,'recarga',?,?,?,?,'pendiente',?)
-    """, (cliente_id, usuario_id, monto_usd, equiv,
-          referencia_ext, modo_pago,
-          f"Recarga {modo_pago} — {monto_usd:.2f} USD"))
+        VALUES (?,?,'recarga',?,?,?,'MOCK','pendiente','Recarga pendiente de confirmación')
+    """, (cliente_id, usuario_id, monto_usd, consultas, referencia_ext))
     mov_id = cur.lastrowid
     conn.commit()
     conn.close()
     return mov_id
 
-
 def confirmar_recarga(mov_id: int) -> bool:
-    """
-    Acredita una recarga pendiente: actualiza saldo y marca como acreditado.
-    Retorna True si se procesó, False si ya estaba procesada o no existe.
-    """
     conn = get_conn()
     mov  = conn.execute(
         "SELECT * FROM movimientos_saldo WHERE id=? AND estado='pendiente'",
@@ -696,92 +671,63 @@ def confirmar_recarga(mov_id: int) -> bool:
     if not mov:
         conn.close()
         return False
-    _actualizar_saldo(conn, mov["cliente_id"], mov["monto_usd"])
     conn.execute("""
         UPDATE movimientos_saldo
         SET estado='acreditado', fecha_acreditado=datetime('now','localtime')
         WHERE id=?
     """, (mov_id,))
+    conn.execute("""
+        INSERT INTO saldos (cliente_id, saldo_usd) VALUES (?, ?)
+        ON CONFLICT(cliente_id) DO UPDATE
+        SET saldo_usd  = saldo_usd + excluded.saldo_usd,
+            actualizado = datetime('now','localtime')
+    """, (mov["cliente_id"], mov["monto_usd"]))
     conn.commit()
     conn.close()
     return True
-
 
 def rechazar_recarga(mov_id: int) -> bool:
-    """Marca una recarga como rechazada sin modificar el saldo."""
     conn = get_conn()
-    ok   = conn.execute(
+    conn.execute(
         "UPDATE movimientos_saldo SET estado='rechazado' WHERE id=? AND estado='pendiente'",
         (mov_id,)
-    ).rowcount > 0
-    conn.commit()
-    conn.close()
-    return ok
-
-
-def consumir_saldo(cliente_id: int, usuario_id: int,
-                   cantidad: int, descripcion: str = "") -> bool:
-    """
-    Descuenta saldo por 'cantidad' consultas.
-    Retorna True si había saldo, False si no alcanzaba.
-    Operacion atomica con bloqueo de fila.
-    """
-    precio = get_precio_cliente(cliente_id) or PRECIO_DEFAULT_USD
-    monto  = cantidad * precio
-    conn   = get_conn()
-    saldo_row = conn.execute(
-        "SELECT saldo_usd FROM saldos WHERE cliente_id=?", (cliente_id,)
-    ).fetchone()
-    saldo_actual = float(saldo_row["saldo_usd"]) if saldo_row else 0.0
-    if saldo_actual < monto - 0.0001:   # tolerancia de floating point
-        conn.close()
-        return False
-    _actualizar_saldo(conn, cliente_id, -monto)
-    conn.execute("""
-        INSERT INTO movimientos_saldo
-            (cliente_id, usuario_id, tipo, monto_usd, consultas_equiv,
-             referencia_ext, modo_pago, estado, descripcion)
-        VALUES (?,?,'consumo',?,?,NULL,'SISTEMA','acreditado',?)
-    """, (cliente_id, usuario_id, monto, cantidad, descripcion or f"{cantidad} consulta(s)"))
+    )
     conn.commit()
     conn.close()
     return True
 
-
-def ajuste_admin_saldo(cliente_id: int, admin_id: int,
-                        monto_usd: float, descripcion: str) -> bool:
-    """Ajuste manual del saldo por el administrador (positivo o negativo)."""
-    conn = get_conn()
-    _actualizar_saldo(conn, cliente_id, monto_usd)
-    tipo = "ajuste_admin"
-    conn.execute("""
-        INSERT INTO movimientos_saldo
-            (cliente_id, usuario_id, tipo, monto_usd, consultas_equiv,
-             referencia_ext, modo_pago, estado, descripcion, fecha_acreditado)
-        VALUES (?,?,?,?,0,NULL,'ADMIN','acreditado',?,datetime('now','localtime'))
-    """, (cliente_id, admin_id, tipo, monto_usd, descripcion))
-    conn.commit()
-    conn.close()
-    return True
-
-
-def get_movimientos(cliente_id: int, limite: int = 100) -> list:
-    """Historial de movimientos de saldo para un cliente."""
+def get_movimientos(cliente_id: int, limite=50) -> list:
     conn = get_conn()
     rows = conn.execute("""
-        SELECT m.*, u.nombre as usuario_nombre
+        SELECT m.*, u.nombre AS usuario_nombre
         FROM movimientos_saldo m
         LEFT JOIN usuarios u ON m.usuario_id = u.id
         WHERE m.cliente_id=?
-        ORDER BY m.fecha_hora DESC
-        LIMIT ?
+        ORDER BY m.fecha_hora DESC LIMIT ?
     """, (cliente_id, limite)).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
+def ajuste_admin_saldo(cliente_id: int, admin_id: int,
+                        monto_usd: float, descripcion: str):
+    conn = get_conn()
+    conn.execute("""
+        INSERT INTO saldos (cliente_id, saldo_usd) VALUES (?, ?)
+        ON CONFLICT(cliente_id) DO UPDATE
+        SET saldo_usd  = MAX(0, saldo_usd + ?),
+            actualizado = datetime('now','localtime')
+    """, (cliente_id, max(0, monto_usd), monto_usd))
+    conn.execute("""
+        INSERT INTO movimientos_saldo
+            (cliente_id, usuario_id, tipo, monto_usd,
+             modo_pago, estado, descripcion, fecha_acreditado)
+        VALUES (?,?,'ajuste_admin',?,
+                'ADMIN','acreditado',?,datetime('now','localtime'))
+    """, (cliente_id, admin_id, monto_usd, descripcion))
+    conn.commit()
+    conn.close()
 
 def get_mov_pendiente_por_ref(referencia_ext: str) -> dict | None:
-    """Busca un movimiento pendiente por su referencia externa (ID de MP)."""
     conn = get_conn()
     row  = conn.execute(
         "SELECT * FROM movimientos_saldo WHERE referencia_ext=? AND estado='pendiente' LIMIT 1",
@@ -790,178 +736,84 @@ def get_mov_pendiente_por_ref(referencia_ext: str) -> dict | None:
     conn.close()
     return dict(row) if row else None
 
-
-def get_resumen_saldo(cliente_id: int) -> dict:
-    """Todo lo que necesita la pantalla de Estado de cuenta."""
-    saldo  = get_saldo(cliente_id)
-    precio = get_precio_cliente(cliente_id) or PRECIO_DEFAULT_USD
-    equiv  = int(saldo / precio) if precio > 0 else 0
-    conn   = get_conn()
-    # Total recargado histórico
-    tot_recargado = conn.execute(
-        "SELECT COALESCE(SUM(monto_usd),0) FROM movimientos_saldo "
-        "WHERE cliente_id=? AND tipo='recarga' AND estado='acreditado'",
-        (cliente_id,)
-    ).fetchone()[0]
-    # Total consumido histórico
-    tot_consumido = conn.execute(
-        "SELECT COALESCE(SUM(monto_usd),0) FROM movimientos_saldo "
-        "WHERE cliente_id=? AND tipo='consumo' AND estado='acreditado'",
-        (cliente_id,)
-    ).fetchone()[0]
-    # Recarga pendiente (si hay)
-    pendiente = conn.execute(
-        "SELECT id, monto_usd, referencia_ext, modo_pago, fecha_hora "
-        "FROM movimientos_saldo "
-        "WHERE cliente_id=? AND tipo='recarga' AND estado='pendiente' "
-        "ORDER BY fecha_hora DESC LIMIT 1",
-        (cliente_id,)
-    ).fetchone()
-    conn.close()
-    return {
-        "saldo_usd":       saldo,
-        "consultas_disp":  equiv,
-        "precio_usd":      precio,
-        "tot_recargado":   float(tot_recargado),
-        "tot_consumido":   float(tot_consumido),
-        "pendiente":       dict(pendiente) if pendiente else None,
-    }
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# VIGILADOS — SEGUIMIENTO MENSUAL
-# ══════════════════════════════════════════════════════════════════════════════
+# ── Vigilados / Seguimiento ───────────────────────────────────────────────────
 
 def agregar_vigilado(cliente_id: int, usuario_id: int,
                      cuit: str, alias: str = "") -> tuple[bool, str]:
-    """Alta de un CUIT a vigilar. Reactivar si ya existía."""
-    cuit = cuit.replace("-","").replace(".","").replace(" ","").strip()
+    cuit_limpio = cuit.replace("-","").replace(".","").strip()
     conn = get_conn()
     try:
         conn.execute("""
             INSERT INTO vigilados (cliente_id, usuario_id, cuit, alias)
-            VALUES (?,?,?,?)
-            ON CONFLICT(cliente_id, cuit) DO UPDATE
-            SET activo=1, alias=excluded.alias, usuario_id=excluded.usuario_id
-        """, (cliente_id, usuario_id, cuit, alias or cuit))
+            VALUES (?, ?, ?, ?)
+        """, (cliente_id, usuario_id, cuit_limpio, alias or cuit_limpio))
         conn.commit()
-        return True, "CUIT agregado al seguimiento"
-    except Exception as e:
-        return False, str(e)
+        return True, "Agregado al seguimiento"
+    except sqlite3.IntegrityError:
+        return False, "Este CUIT ya está en seguimiento"
     finally:
         conn.close()
 
-
-def agregar_vigilados_masivo(cliente_id: int, usuario_id: int,
-                              lista: list[dict]) -> tuple[int, int]:
-    """
-    Alta masiva desde lista de dicts con claves 'cuit' y opcionalmente 'alias'.
-    Retorna (ok, errores).
-    """
-    ok = err = 0
-    for item in lista:
-        cuit  = str(item.get("cuit","")).replace("-","").replace(".","").strip()
-        alias = str(item.get("alias","") or item.get("nombre","") or cuit).strip()
-        if not cuit:
-            err += 1; continue
-        r, _ = agregar_vigilado(cliente_id, usuario_id, cuit, alias)
-        if r: ok += 1
-        else: err += 1
-    return ok, err
-
-
-def listar_vigilados(cliente_id: int, solo_activos: bool = True) -> list:
-    conn  = get_conn()
-    where = "WHERE v.cliente_id=?" + (" AND v.activo=1" if solo_activos else "")
-    rows  = conn.execute(f"""
-        SELECT v.*,
-               h.periodo_bcra     AS ultimo_periodo,
-               h.monto_sit1       AS ultimo_sit1,
-               h.monto_riesgo     AS ultimo_riesgo,
-               h.variacion        AS ultima_variacion,
-               h.fecha_consulta   AS ultima_fecha
+def listar_vigilados(cliente_id: int) -> list:
+    conn = get_conn()
+    rows = conn.execute("""
+        SELECT v.*, 
+               (SELECT variacion FROM historial_vigilados
+                WHERE vigilado_id=v.id ORDER BY id DESC LIMIT 1) AS ultima_variacion,
+               (SELECT monto_sit1 + monto_riesgo FROM historial_vigilados
+                WHERE vigilado_id=v.id ORDER BY id DESC LIMIT 1) AS ultimo_total
         FROM vigilados v
-        LEFT JOIN historial_vigilados h
-               ON h.vigilado_id = v.id
-              AND h.id = (SELECT MAX(id) FROM historial_vigilados
-                          WHERE vigilado_id = v.id)
-        {where}
-        ORDER BY v.alias, v.cuit
+        WHERE v.cliente_id=? AND v.activo=1
+        ORDER BY v.alias
     """, (cliente_id,)).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
-
-def actualizar_umbral_vigilado(vigilado_id: int, cliente_id: int, umbral: float) -> bool:
-    """Actualiza el umbral pasa/no pasa de un CUIT vigilado."""
+def eliminar_vigilado(vigilado_id: int, cliente_id: int) -> bool:
     conn = get_conn()
-    ok   = conn.execute(
-        "UPDATE vigilados SET umbral_pct=? WHERE id=? AND cliente_id=?",
-        (umbral, vigilado_id, cliente_id)
-    ).rowcount > 0
-    conn.commit()
-    conn.close()
-    return ok
-
-
-def desactivar_vigilado(vigilado_id: int, cliente_id: int) -> bool:
-    conn = get_conn()
-    ok   = conn.execute(
+    conn.execute(
         "UPDATE vigilados SET activo=0 WHERE id=? AND cliente_id=?",
         (vigilado_id, cliente_id)
-    ).rowcount > 0
+    )
     conn.commit()
     conn.close()
-    return ok
+    return True
 
-
-def get_historial_vigilado(vigilado_id: int, limite: int = 24) -> list:
+def get_historial_vigilado(vigilado_id: int, limite=12) -> list:
     conn = get_conn()
     rows = conn.execute("""
         SELECT * FROM historial_vigilados
         WHERE vigilado_id=?
-        ORDER BY fecha_consulta DESC
-        LIMIT ?
+        ORDER BY id DESC LIMIT ?
     """, (vigilado_id, limite)).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
-
-def registrar_resultado_seguimiento(vigilado_id: int, cliente_id: int,
-                                     usuario_id: int, resultado: dict,
-                                     costo: float) -> str:
-    """
-    Guarda el resultado del mes para un vigilado y calcula la variación
-    comparando con el registro anterior.
-    Retorna el código de variación.
-    """
-    conn = get_conn()
-
-    # Último registro del mismo vigilado
-    prev = conn.execute("""
-        SELECT monto_sit1, monto_riesgo, sin_deuda
-        FROM historial_vigilados
-        WHERE vigilado_id=?
-        ORDER BY fecha_consulta DESC LIMIT 1
-    """, (vigilado_id,)).fetchone()
-
-    if resultado.get("error"):
-        variacion = "ERROR"
+def registrar_resultado_vigilado(vigilado_id: int, cliente_id: int,
+                                  periodo: str, sit1: float, riesgo: float,
+                                  n_ent: int, sit_peor: int,
+                                  sin_d: bool, costo: float = 0.0,
+                                  error: str = "") -> str:
+    if error:
+        conn = get_conn()
         conn.execute("""
             INSERT INTO historial_vigilados
-                (vigilado_id, cliente_id, variacion, costo, error)
-            VALUES (?,?,'ERROR',?,?)
-        """, (vigilado_id, cliente_id, costo, resultado["error"][:200]))
+                (vigilado_id, cliente_id, periodo_bcra, sin_deuda, variacion, error)
+            VALUES (?,?,?,?,?,?)
+        """, (vigilado_id, cliente_id, periodo, sin_d, "ERROR", error))
+        conn.execute(
+            "UPDATE vigilados SET ultima_consulta=datetime('now','localtime') WHERE id=?",
+            (vigilado_id,)
+        )
         conn.commit()
         conn.close()
-        return variacion
+        return "ERROR"
 
-    sit1    = resultado.get("Monto_Sit1", 0)
-    riesgo  = resultado.get("Monto_Riesgo", 0)
-    n_ent   = len(resultado.get("Entidades", []))
-    sin_d   = 1 if resultado.get("Sin_Deuda") else 0
-    periodo = resultado.get("Periodo", "")
-    sit_peor = max((e.get("Situacion", 0) for e in resultado.get("Entidades", [])), default=0)
+    conn = get_conn()
+    prev = conn.execute("""
+        SELECT * FROM historial_vigilados
+        WHERE vigilado_id=? ORDER BY id DESC LIMIT 1
+    """, (vigilado_id,)).fetchone()
 
     if prev is None:
         variacion = "NUEVO"
@@ -970,11 +822,11 @@ def registrar_resultado_seguimiento(vigilado_id: int, cliente_id: int,
         variacion = "SIN_CAMBIO"
         d_sit1 = d_riesgo = 0.0
     elif sin_d and not prev["sin_deuda"]:
-        variacion = "BAJA"   # tenía deuda, ahora no
+        variacion = "BAJA"
         d_sit1   = -float(prev["monto_sit1"])
         d_riesgo = -float(prev["monto_riesgo"])
     elif not sin_d and prev["sin_deuda"]:
-        variacion = "SUBE"   # no tenía deuda, ahora sí
+        variacion = "SUBE"
         d_sit1   = sit1
         d_riesgo = riesgo
     else:
@@ -997,7 +849,6 @@ def registrar_resultado_seguimiento(vigilado_id: int, cliente_id: int,
     """, (vigilado_id, cliente_id, periodo, sit1, riesgo,
           n_ent, sit_peor, sin_d, variacion, d_sit1, d_riesgo, costo))
 
-    # Actualizar ultima_consulta en vigilados
     conn.execute("""
         UPDATE vigilados SET ultima_consulta=datetime('now','localtime')
         WHERE id=?
@@ -1007,16 +858,13 @@ def registrar_resultado_seguimiento(vigilado_id: int, cliente_id: int,
     conn.close()
     return variacion
 
-
 def get_resumen_seguimiento(cliente_id: int) -> dict:
-    """Resumen para el dashboard de seguimiento."""
     conn = get_conn()
     total = conn.execute(
         "SELECT COUNT(*) FROM vigilados WHERE cliente_id=? AND activo=1",
         (cliente_id,)
     ).fetchone()[0]
 
-    # Variaciones del último procesamiento
     stats = conn.execute("""
         SELECT variacion, COUNT(*) as n
         FROM historial_vigilados h
@@ -1033,11 +881,9 @@ def get_resumen_seguimiento(cliente_id: int) -> dict:
         res[row["variacion"]] = row["n"]
     return res
 
-
 def guardar_reporte_seguimiento(cliente_id: int, usuario_id: int,
                                  periodo: str, stats: dict,
                                  pdf_bytes: bytes) -> int:
-    """Persiste el PDF mensual del seguimiento. Retorna el id del registro."""
     conn = get_conn()
     cur  = conn.execute("""
         INSERT INTO reportes_seguimiento
@@ -1052,9 +898,7 @@ def guardar_reporte_seguimiento(cliente_id: int, usuario_id: int,
     conn.close()
     return rid
 
-
 def listar_reportes_seguimiento(cliente_id: int) -> list:
-    """Lista los PDFs mensuales guardados (sin el BLOB para no cargar todo)."""
     conn = get_conn()
     rows = conn.execute("""
         SELECT id, periodo, fecha_gen, total_cuits,
@@ -1066,9 +910,7 @@ def listar_reportes_seguimiento(cliente_id: int) -> list:
     conn.close()
     return [dict(r) for r in rows]
 
-
 def get_pdf_seguimiento(reporte_id: int, cliente_id: int) -> bytes | None:
-    """Recupera el PDF de un reporte guardado."""
     conn = get_conn()
     row  = conn.execute(
         "SELECT pdf_bytes FROM reportes_seguimiento WHERE id=? AND cliente_id=?",
@@ -1077,26 +919,19 @@ def get_pdf_seguimiento(reporte_id: int, cliente_id: int) -> bytes | None:
     conn.close()
     return bytes(row["pdf_bytes"]) if row and row["pdf_bytes"] else None
 
-
 def registrar_empresa_usuario(nombre_empresa: str, cuit_empresa: str,
                                nombre_usuario: str, email: str,
                                password: str) -> tuple[bool, str]:
-    """
-    Crea un cliente nuevo + su usuario en estado pendiente de aprobación.
-    Al aprobarse recibe 100 consultas de crédito de prueba.
-    """
     import bcrypt
     pw_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
     conn = get_conn()
     try:
-        # Crear cliente
         cur = conn.execute("""
             INSERT INTO clientes (nombre, email, cuit_empresa, precio_consulta, notas)
             VALUES (?,?,?,0.35,'Registro web — pendiente de aprobación')
         """, (nombre_empresa, email, cuit_empresa))
         cliente_id = cur.lastrowid
 
-        # Crear usuario pendiente (aprobado=0)
         conn.execute("""
             INSERT INTO usuarios
                 (nombre, email, password_hash, cliente_id, rol, activo, aprobado)
@@ -1112,12 +947,8 @@ def registrar_empresa_usuario(nombre_empresa: str, cuit_empresa: str,
     finally:
         conn.close()
 
-
 def aprobar_usuario(usuario_id: int, admin_id: int,
                     credito_consultas: int = 100) -> bool:
-    """
-    Aprueba un usuario y le acredita el crédito inicial de prueba.
-    """
     conn = get_conn()
     u = conn.execute(
         "SELECT * FROM usuarios WHERE id=?", (usuario_id,)
@@ -1126,11 +957,8 @@ def aprobar_usuario(usuario_id: int, admin_id: int,
         conn.close()
         return False
 
-    conn.execute(
-        "UPDATE usuarios SET aprobado=1 WHERE id=?", (usuario_id,)
-    )
+    conn.execute("UPDATE usuarios SET aprobado=1 WHERE id=?", (usuario_id,))
 
-    # Acreditar crédito inicial de prueba
     precio = conn.execute(
         "SELECT precio_consulta FROM clientes WHERE id=?",
         (u["cliente_id"],)
@@ -1156,7 +984,6 @@ def aprobar_usuario(usuario_id: int, admin_id: int,
     conn.commit()
     conn.close()
     return True
-
 
 def listar_usuarios_pendientes() -> list:
     conn = get_conn()

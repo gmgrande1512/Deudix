@@ -83,11 +83,6 @@ def verificar_password(password: str, hash_guardado: str) -> bool:
         return False
 
 def _capturar_contexto() -> tuple[str, str]:
-    """
-    Intenta obtener IP y user-agent del contexto HTTP de Streamlit.
-    En Streamlit Cloud / producción estos headers están disponibles.
-    Devuelve (ip_raw, user_agent).
-    """
     try:
         from streamlit.web.server.websocket_headers import _get_websocket_headers
         headers = _get_websocket_headers()
@@ -98,7 +93,6 @@ def _capturar_contexto() -> tuple[str, str]:
         return ip.split(",")[0].strip(), ua
     except Exception:
         pass
-    # Fallback: leer desde st.context si existe (Streamlit ≥ 1.37)
     try:
         ip = getattr(st.context, "ip", "") or ""
         ua = getattr(st.context, "headers", {}).get("User-Agent", "")
@@ -131,7 +125,6 @@ def login_screen():
             if not email or not password:
                 st.error("Completá email y contraseña")
                 return
-            # Primero verificar si existe en cualquier estado
             usuario_raw = get_usuario_cualquier_estado(email.strip().lower())
             if not usuario_raw:
                 st.error("Usuario no encontrado")
@@ -142,14 +135,13 @@ def login_screen():
             if not usuario_raw.get("aprobado"):
                 st.warning(
                     "Tu cuenta está pendiente de aprobación. "
-                    "Te notificaremos cuando esté activa."
+                    "Dentro de las próximas 24hs ya podrás estar habilitado."
                 )
                 return
             if not usuario_raw.get("activo"):
                 st.error("Tu cuenta está desactivada. Contactá al administrador.")
                 return
             usuario = usuario_raw
-            # Login correcto — marcar pendiente de TyC si no aceptó
             actualizar_ultimo_acceso(usuario["id"])
             st.session_state["usuario"]         = usuario
             st.session_state["logueado"]        = True
@@ -157,11 +149,12 @@ def login_screen():
             st.query_params["sid"] = usuario["email"]
             st.rerun()
 
-        r1, r2 = st.columns(2)
-        with r1:
-            if st.button("Crear cuenta nueva", use_container_width=True, key="btn_ir_registro"):
-                st.session_state["pantalla"] = "registro"
-                st.rerun()
+        # BUG 1 FIX: un solo botón "Crear cuenta nueva"
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button("Crear cuenta nueva", use_container_width=True, key="btn_ir_registro"):
+            st.session_state["pantalla"] = "registro"
+            st.rerun()
+
         st.markdown(
             '<p style="text-align:center;color:#c7c7cc;font-size:11px;margin-top:32px;">'
             '© 2026 Deudix · Todos los derechos reservados</p>',
@@ -177,34 +170,21 @@ def tyc_screen(usuario: dict):
         st.markdown("<br><br>", unsafe_allow_html=True)
         st.markdown("""
         <div style="text-align:center;margin-bottom:24px;">
-            <div style="width:56px;height:56px;background:#1d1d1f;border-radius:16px;
-                        display:inline-flex;align-items:center;justify-content:center;margin-bottom:14px;">
-                <span style="font-size:26px;">📋</span>
+            <div style="width:64px;height:64px;background:#1d1d1f;border-radius:18px;
+                        display:inline-flex;align-items:center;justify-content:center;
+                        margin-bottom:16px;">
+                <span style="font-size:28px;">📋</span>
             </div>
             <h2 style="font-family:'DM Sans',sans-serif;font-size:24px;font-weight:700;
-                       color:#1d1d1f;letter-spacing:-0.02em;margin:0 0 6px 0;">Términos y Condiciones</h2>
+                       color:#1d1d1f;letter-spacing:-0.02em;margin:0 0 6px 0;">
+                Términos y condiciones</h2>
             <p style="font-size:14px;color:#86868b;margin:0;">
-                Revisá y aceptá los términos antes de continuar
-            </p>
+                Leé y aceptá los términos para continuar</p>
         </div>
         """, unsafe_allow_html=True)
 
-        # Texto de TyC en caja con scroll — HTML para poder controlar el diseño
-        html_tyc = TEXTO_TYC
-        # Convertir markdown básico a HTML para la caja
-        import re
-        html_tyc = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', html_tyc)
-        html_tyc = re.sub(r'^- (.+)$', r'<li>\1</li>', html_tyc, flags=re.MULTILINE)
-        html_tyc = re.sub(r'(<li>.*</li>\n?)+', lambda m: f'<ul>{m.group()}</ul>', html_tyc)
-        html_tyc = re.sub(r'\n\n', '</p><p>', html_tyc.strip())
-        html_tyc = f'<p>{html_tyc}</p>'
-
-        st.markdown(f'<div class="tyc-box">{html_tyc}</div>', unsafe_allow_html=True)
-
-        # Versión del documento
         st.markdown(
-            f'<p style="font-size:11px;color:#aeaeb2;text-align:right;margin:-12px 0 16px 0;">'
-            f'Versión {TYC_VERSION} · Hash: {__import__("database").TYC_HASH}</p>',
+            f'<div class="tyc-box">{TEXTO_TYC}</div>',
             unsafe_allow_html=True,
         )
 
@@ -245,7 +225,6 @@ def logout():
 def require_login():
     init_db()
 
-    # Recuperar sesión desde query_params si se perdió por F5 o reinicio
     if not st.session_state.get("logueado"):
         _sid = st.query_params.get("sid", "")
         if _sid:
@@ -255,7 +234,6 @@ def require_login():
                 st.session_state["logueado"]      = True
                 st.session_state["tyc_pendiente"] = not usuario_acepto_tyc(_u["id"])
 
-    # Paso 1 — ¿está logueado?
     if not st.session_state.get("logueado"):
         pantalla = st.session_state.get("pantalla", "login")
         if pantalla == "registro":
@@ -266,12 +244,10 @@ def require_login():
 
     usuario = st.session_state["usuario"]
 
-    # Paso 2 — ¿aceptó los TyC vigentes?
     if st.session_state.get("tyc_pendiente", False):
         tyc_screen(usuario)
         st.stop()
 
-    # Re-verificar en DB por si se actualizó la versión de TyC
     if not usuario_acepto_tyc(usuario["id"]):
         st.session_state["tyc_pendiente"] = True
         tyc_screen(usuario)
@@ -306,7 +282,25 @@ def registro_screen():
         </div>
         """, unsafe_allow_html=True)
 
-        # Datos de empresa
+        # BUG 1+3 FIX: mostrar confirmación inline sin botones duplicados
+        if st.session_state.get("registro_exitoso"):
+            st.success(
+                "✅ Solicitud enviada correctamente. "
+                "Dentro de las próximas 24hs ya podrás estar habilitado."  # BUG 2 FIX
+            )
+            st.markdown(
+                '<p style="text-align:center;font-size:13px;color:#86868b;margin-top:12px;">'
+                'Tu solicitud fue recibida. El equipo de Deudix la revisará a la brevedad.</p>',
+                unsafe_allow_html=True,
+            )
+            # BUG 1+3 FIX: un solo botón, limpia el estado y va directo al login
+            if st.button("Volver al login", use_container_width=True, key="btn_ok_volver"):
+                st.session_state.pop("registro_exitoso", None)
+                st.session_state["pantalla"] = "login"
+                st.rerun()
+            return  # no mostrar el formulario si ya se registró
+
+        # Formulario
         st.markdown(
             '<p style="font-size:11px;font-weight:600;letter-spacing:0.08em;'
             'text-transform:uppercase;color:#86868b;margin:0 0 10px 0;">Empresa</p>',
@@ -339,9 +333,7 @@ def registro_screen():
                                         key="reg_pass2")
 
         st.markdown("<br>", unsafe_allow_html=True)
-        if st.button("Solicitar acceso", use_container_width=True,
-                     key="btn_registrar"):
-            # Validaciones
+        if st.button("Solicitar acceso", use_container_width=True, key="btn_registrar"):
             errores = []
             if not nombre_empresa.strip(): errores.append("Nombre de empresa")
             if not cuit_empresa.strip():   errores.append("CUIT")
@@ -363,23 +355,15 @@ def registro_screen():
                     password,
                 )
                 if ok:
-                    st.success(
-                        "✅ Solicitud enviada correctamente. "
-                        "Recibirás acceso en las próximas 24 horas."
-                    )
-                    st.markdown(
-                        '<p style="text-align:center;font-size:13px;color:#86868b;'
-                        'margin-top:12px;">Podés cerrar esta ventana o volver al login.</p>',
-                        unsafe_allow_html=True,
-                    )
-                    if st.button("Volver al login", key="btn_volver_ok"):
-                        st.session_state["pantalla"] = "login"
-                        st.rerun()
+                    # BUG 1+3 FIX: guardar en session_state y rerun para mostrar confirmación limpia
+                    st.session_state["registro_exitoso"] = True
+                    st.rerun()
                 else:
                     st.error(f"❌ {msg}")
 
-        if st.button("← Volver al login", key="btn_volver_login",
-                     use_container_width=True):
+        # Botón volver solo cuando está en el formulario (no en confirmación)
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button("← Volver al login", key="btn_volver_login", use_container_width=True):
             st.session_state["pantalla"] = "login"
             st.rerun()
 

@@ -184,7 +184,7 @@ div[data-testid="stDownloadButton"] button {
 # ══════════════════════════════════════════════════════════════════════════════
 # SIDEBAR — MENÚ PRINCIPAL
 # ══════════════════════════════════════════════════════════════════════════════
-es_admin   = usuario_actual.get("rol") == "admin"
+es_admin   = usuario_actual.get("email","").lower() == "admin@deudix.com"
 cliente    = get_cliente(usuario_actual.get("cliente_id", 0))
 logo_bytes = cliente.get("logo_bytes") if cliente else None
 
