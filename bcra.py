@@ -1,59 +1,80 @@
 """
-bcra.py — Lógica de consulta a la API BCRA y procesamiento de respuestas.
+bcra.py — Consulta a la API BCRA usando curl del sistema.
 
-Mejoras:
-  - Sesión nueva por cada consulta (evita sesiones stale en Streamlit Cloud)
-  - Intenta con verify=True primero, fallback a verify=False
-  - Mejor logging del error real para diagnóstico
+El WAF del BCRA bloquea las librerías Python (requests, curl_cffi) por
+huella TLS. El curl del sistema operativo sí pasa, así que lo usamos
+via subprocess. Disponible en Windows 10+, Linux y Streamlit Cloud.
 """
-import requests
-import urllib3
+import subprocess
+import json
 import time
-import os
-
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+import shutil
 
 BASE_URL    = "https://api.bcra.gob.ar/centraldedeudores/v1.0/Deudas"
 SITS_RIESGO = [2, 3, 4, 5]
 
-# En Streamlit Cloud puede haber restricciones de red distintas
-_ES_CLOUD = os.path.exists("/mount/src")
+# Verificar que curl exista
+_CURL = shutil.which("curl")
 
-# ── Headers que simulan un navegador real ─────────────────────────────────────
+def _consulta_curl(url: str, timeout: int = 20) -> dict:
+    """Llama a curl del sistema y parsea la respuesta JSON."""
+    if not _CURL:
+        return {"ok": False, "error": "curl no encontrado en el sistema"}
 
-_HEADERS = {
-    "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                       "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-    "Accept":          "application/json, text/plain, */*",
-    "Accept-Language": "es-AR,es;q=0.9,en;q=0.8",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Connection":      "keep-alive",
-    "Referer":         "https://www.bcra.gob.ar/BCRAyVos/Registro_sistemaFinanciero.asp",
-    "Origin":          "https://www.bcra.gob.ar",
-    "Sec-Fetch-Dest":  "empty",
-    "Sec-Fetch-Mode":  "cors",
-    "Sec-Fetch-Site":  "same-origin",
-}
-
-
-def _nueva_sesion(verify: bool = True) -> requests.Session:
-    """Crea una sesión fresca. En Cloud probamos con y sin SSL verify."""
-    s = requests.Session()
-    s.verify = verify
-    s.headers.update(_HEADERS)
-    # Warm-up: visitar la página pública para obtener cookies
     try:
-        s.get(
-            "https://www.bcra.gob.ar/BCRAyVos/Registro_sistemaFinanciero.asp",
-            timeout=10,
-            verify=verify,
+        result = subprocess.run(
+            [
+                _CURL,
+                "-s",                    # silencioso
+                "-S",                    # mostrar errores
+                "--max-time", str(timeout),
+                "--connect-timeout", "10",
+                "-H", "Accept: application/json",
+                "-H", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) "
+                      "Chrome/126.0.0.0 Safari/537.36",
+                "-w", "\n%{http_code}",  # agregar código HTTP al final
+                url,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=timeout + 5,
         )
-    except Exception:
-        pass
-    return s
+
+        output = result.stdout.strip()
+        if not output:
+            stderr = result.stderr.strip()
+            return {"ok": False, "error": f"curl sin respuesta: {stderr[:100]}"}
+
+        # Separar body del código HTTP (último línea)
+        lines = output.rsplit("\n", 1)
+        body  = lines[0].strip()
+        code  = int(lines[1]) if len(lines) > 1 and lines[1].strip().isdigit() else 0
+
+        if code == 200:
+            try:
+                data = json.loads(body)
+                return {"ok": True, "data": data}
+            except json.JSONDecodeError:
+                return {"ok": True, "data": None}
+        elif code == 404:
+            return {"ok": True, "data": None}
+        elif code == 503:
+            return {"ok": False, "error": "BCRA en mantenimiento (503). Intentá en unos minutos."}
+        elif code == 429:
+            return {"ok": False, "error": "Rate limit BCRA (429)", "retry": True}
+        elif code == 0:
+            return {"ok": False, "error": f"curl error: {body[:100]}"}
+        else:
+            return {"ok": False, "error": f"HTTP {code}"}
+
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "Timeout — el BCRA no respondió"}
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {str(e)[:80]}"}
 
 
-def consultar_bcra(cuit, intentos=4) -> dict:
+def consultar_bcra(cuit, intentos=3) -> dict:
     """
     Consulta la API BCRA para un CUIT dado.
     Retorna {"ok": True, "data": ...} o {"ok": False, "error": "..."}.
@@ -64,73 +85,27 @@ def consultar_bcra(cuit, intentos=4) -> dict:
     ultimo_error = ""
 
     for intento in range(1, intentos + 1):
-        # Alternar: intento 1 y 3 con verify=True, 2 y 4 con verify=False
-        verificar_ssl = (intento % 2 == 1)
+        resultado = _consulta_curl(url)
 
-        try:
-            sesion = _nueva_sesion(verify=verificar_ssl)
-            resp = sesion.get(url, timeout=25)
+        if resultado.get("ok"):
+            return resultado
 
-            if resp.status_code == 200:
-                try:
-                    data = resp.json()
-                    return {"ok": True, "data": data}
-                except Exception:
-                    return {"ok": True, "data": None}
+        ultimo_error = resultado.get("error", "desconocido")
 
-            elif resp.status_code == 404:
-                return {"ok": True, "data": None}
+        if "mantenimiento" in ultimo_error.lower():
+            return resultado  # No reintentar si está en mantenimiento
 
-            elif resp.status_code == 429:
-                ultimo_error = f"HTTP 429 (rate limit) intento {intento}"
-                time.sleep(5 * intento)
-                continue
+        if resultado.get("retry"):
+            time.sleep(5 * intento)
+        elif intento < intentos:
+            time.sleep(2 * intento)
 
-            elif resp.status_code == 403:
-                ultimo_error = f"HTTP 403 (bloqueado) intento {intento}"
-                time.sleep(3 * intento)
-                continue
-
-            elif resp.status_code >= 500:
-                ultimo_error = f"HTTP {resp.status_code} (error servidor) intento {intento}"
-                time.sleep(3 * intento)
-                continue
-
-            else:
-                ultimo_error = f"HTTP {resp.status_code} intento {intento}"
-                if intento < intentos:
-                    time.sleep(2 * intento)
-                    continue
-                return {"ok": False, "error": ultimo_error}
-
-        except requests.exceptions.SSLError as e:
-            ultimo_error = f"SSL error intento {intento} (verify={verificar_ssl})"
-            if intento < intentos:
-                time.sleep(2)
-                continue
-        except requests.exceptions.ConnectionError as e:
-            ultimo_error = f"Conexión rechazada intento {intento}"
-            if intento < intentos:
-                time.sleep(3 * intento)
-                continue
-        except requests.exceptions.Timeout:
-            ultimo_error = f"Timeout intento {intento}"
-            if intento < intentos:
-                time.sleep(2)
-                continue
-        except Exception as e:
-            ultimo_error = f"{type(e).__name__}: {str(e)[:80]} intento {intento}"
-            if intento < intentos:
-                time.sleep(3 * intento)
-                continue
-
-    return {"ok": False, "error": ultimo_error or "Falló después de todos los intentos"}
+    return {"ok": False, "error": ultimo_error}
 
 
 # ── Procesamiento de respuestas ───────────────────────────────────────────────
 
 def extraer_nombre_api(data) -> str:
-    """Busca la denominación en todos los campos posibles de la respuesta BCRA."""
     try:
         if not data:
             return ""
@@ -162,18 +137,12 @@ def extraer_nombre_api(data) -> str:
         return ""
 
 def procesar_respuesta(data, cuit, nombre="", capital=None) -> dict:
-    """Convierte la respuesta cruda de la API en un dict normalizado."""
     if not nombre:
         nombre = extraer_nombre_api(data)
     base = {
-        "CUIT":        cuit,
-        "Nombre":      nombre,
-        "Capital":     capital,
-        "Sin_Deuda":   True,
-        "Monto_Sit1":  0,
-        "Monto_Riesgo":0,
-        "Entidades":   [],
-        "Periodo":     "",
+        "CUIT": cuit, "Nombre": nombre, "Capital": capital,
+        "Sin_Deuda": True, "Monto_Sit1": 0, "Monto_Riesgo": 0,
+        "Entidades": [], "Periodo": "",
     }
     if data is None:
         return base
@@ -203,17 +172,13 @@ def procesar_respuesta(data, cuit, nombre="", capital=None) -> dict:
             riesgo += monto
     return {
         **base,
-        "Sin_Deuda":    False,
-        "Monto_Sit1":   sit1,
-        "Monto_Riesgo": riesgo,
-        "Entidades":    detalle,
-        "Periodo":      periodo_id,
+        "Sin_Deuda": False, "Monto_Sit1": sit1, "Monto_Riesgo": riesgo,
+        "Entidades": detalle, "Periodo": periodo_id,
     }
 
 # ── Helpers de cálculo ────────────────────────────────────────────────────────
 
 def calcular_pasa(sit1: float, riesgo: float, umbral: float) -> tuple[float, str]:
-    """Retorna (ratio_porcentaje, 'PASA'|'NO PASA')."""
     total = sit1 + riesgo
     if total == 0:
         return 0.0, "PASA"
@@ -227,19 +192,16 @@ def detalle_str(entidades: list) -> str:
     )
 
 def periodo_a_texto(periodo_str: str) -> str:
-    """Convierte '202604' → 'Abril 2026'."""
     meses = ["Enero","Febrero","Marzo","Abril","Mayo","Junio",
              "Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"]
     try:
-        p    = str(periodo_str).strip()
-        anio = int(p[:4])
-        mes  = int(p[4:6])
+        p = str(periodo_str).strip()
+        anio = int(p[:4]); mes = int(p[4:6])
         return f"{meses[mes-1]} {anio}"
     except Exception:
         return str(periodo_str)
 
 def normalizar_columnas(df):
-    """Normaliza nombres de columnas del Excel de entrada."""
     df.columns = [c.strip().upper() for c in df.columns]
     cuit_col    = next((c for c in df.columns if c in
                         ["CUIT","CUIL","CUIT/CUIL","NRO_CUIT","NRO_CUIL"]), None)
