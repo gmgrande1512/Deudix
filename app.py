@@ -17,8 +17,9 @@ from database import (registrar_evento_individual, registrar_evento_masivo,
                       confirmar_recarga, rechazar_recarga,
                       get_movimientos, ajuste_admin_saldo,
                       get_mov_pendiente_por_ref)
-from bcra     import (consultar_bcra, procesar_respuesta, calcular_pasa,
-                      periodo_a_texto, normalizar_columnas)
+from bcra     import (consultar_bcra, consultar_bcra_historico,
+                      procesar_respuesta, procesar_respuesta_historica,
+                      calcular_pasa, periodo_a_texto, normalizar_columnas)
 from reportes import generar_excel, generar_pdf
 from admin    import render_admin
 from setup    import render_setup
@@ -223,6 +224,7 @@ with st.sidebar:
 
     MENU_ITEMS = [
         ("Consulta individual",  "individual"),
+        ("Consulta histórica",   "historica"),
         ("Carga masiva",         "masiva"),
     ]
     MENU_ITEMS_EXTRA = [
@@ -279,8 +281,9 @@ with st.sidebar:
 FOOTER_HTML = """
 <div class="footer">
   <p class="nombre">Deudix · BCRA Central de Deudores · Uso interno · Datos confidenciales</p>
-  <p class="aviso"><strong>Aviso:</strong> Los datos provienen de fuentes públicas (BCRA y boletines oficiales).
-  Nuestro sistema agrega valor mediante procesamiento y presentación, pero no modifica la información.
+  <p class="aviso"><strong>Aviso:</strong> La información mostrada se obtiene de la API pública del BCRA.
+  Este sitio es independiente del BCRA y no almacena datos personales.
+  Nuestro sistema agrega valor mediante procesamiento, visualización y reportes, pero no modifica la información.
   El BCRA no avala ni certifica este servicio.</p>
 </div>
 """
@@ -767,7 +770,7 @@ def pagina_masiva():
             disabled=procesando_ahora,
         )
     with bc2:
-        btn_cancel = st.button("Cancelar", key="btn_cancel_v2", use_container_width=True)
+        btn_cancel = st.button("Cancelar", key="btn_cancel_v2", use_container_width=True, type="secondary")
 
     if btn_cancel:
         st.session_state["cancelar"]   = True
@@ -1480,13 +1483,254 @@ def _procesar_pago(cliente_id, monto_usd, descripcion,
 
 
 
+def pagina_historica():
+    """Consulta histórica individual — últimos 24 meses de un CUIT."""
+    cliente_actual = get_cliente(usuario_actual.get("cliente_id", 0))
+    if not _perfil_completo(cliente_actual):
+        st.markdown('<p class="page-title">Consulta histórica</p>', unsafe_allow_html=True)
+        with st.container(border=True):
+            st.markdown('''<p style="font-size:16px;font-weight:600;color:#cc0000;margin:0 0 8px 0;">
+                Datos de empresa incompletos</p>''', unsafe_allow_html=True)
+            from setup import CAMPOS_OBLIGATORIOS
+            faltantes = [CAMPOS_OBLIGATORIOS[f] for f in CAMPOS_OBLIGATORIOS
+                         if not ((cliente_actual or {}).get(f) or "").strip()]
+            st.markdown(f'Completá los siguientes campos antes de realizar consultas: **{", ".join(faltantes)}**')
+            if st.button("Completar datos de empresa →", type="primary", key="btn_goto_setup_hist"):
+                st.session_state["_ir_a_setup"] = True
+                st.rerun()
+        return
+
+    st.markdown('<p class="page-title">Consulta histórica</p>', unsafe_allow_html=True)
+    st.markdown('<p class="page-sub">Evolución crediticia de un CUIT en los últimos 24 meses</p>', unsafe_allow_html=True)
+
+    col_form, col_gap, col_result = st.columns([4, 1, 7])
+
+    with col_form:
+        with st.container(border=True):
+            st.markdown('<p class="sec-label">Datos de consulta</p>', unsafe_allow_html=True)
+            cuit_input = st.text_input("CUIT / CUIL",
+                                       placeholder="20-12345678-9",
+                                       max_chars=13,
+                                       key="cuit_hist_v1")
+            st.markdown("<br>", unsafe_allow_html=True)
+            btn_consultar = st.button("Consultar historial BCRA", use_container_width=True,
+                                      type="primary", key="btn_consultar_hist_v1")
+
+            st.markdown('<hr class="divider">', unsafe_allow_html=True)
+            st.markdown('<p class="sec-label">Mapa y Street View</p>', unsafe_allow_html=True)
+            direccion_input = st.text_input("Domicilio",
+                                            placeholder="Av. Corrientes 1234, Buenos Aires",
+                                            key="dir_mapa_hist_v1")
+            if direccion_input.strip():
+                dir_enc   = direccion_input.strip().replace(" ", "+").replace(",", "%2C")
+                gmaps_url = f"https://www.google.com/maps/search/{dir_enc}"
+                st.markdown(
+                    f'<div style="border-radius:12px;overflow:hidden;'
+                    f'border:0.5px solid #e5e5ea;margin-top:8px;">'
+                    f'<iframe width="100%" height="260" frameborder="0" '
+                    f'style="border:0;display:block;" loading="lazy" allowfullscreen '
+                    f'referrerpolicy="no-referrer-when-downgrade" '
+                    f'src="https://maps.google.com/maps?q={dir_enc}&output=embed&z=16">'
+                    f'</iframe></div>'
+                    f'<p style="font-size:11px;color:#86868b;margin:6px 0 0 0;text-align:center;">'
+                    f'<a href="{gmaps_url}" target="_blank" '
+                    f'style="color:#0066cc;text-decoration:none;">Abrir en Google Maps</a></p>',
+                    unsafe_allow_html=True,
+                )
+
+    with col_result:
+        if btn_consultar:
+            if not cuit_input.strip():
+                st.warning("Ingresá un CUIT válido")
+            else:
+                with st.spinner("Consultando historial BCRA…"):
+                    resp = consultar_bcra_historico(cuit_input)
+
+                if not resp["ok"]:
+                    _err_detalle = resp.get("error", "desconocido")
+                    st.markdown(
+                        '<div style="background:#fff8f0;border:1.5px solid #cc6600;border-radius:10px;padding:20px 24px;margin:8px 0;">'
+                        '<p style="font-size:16px;font-weight:700;color:#cc6600;margin:0 0 6px 0;">⚠️ El BCRA no está disponible en este momento</p>'
+                        '<p style="font-size:14px;color:#1d1d1f;margin:0 0 8px 0;">No pudimos conectarnos con la Central de Deudores.</p>'
+                        f'<p style="font-size:11px;color:#aeaeb2;margin:8px 0 0 0;font-family:monospace;">Detalle: {_err_detalle}</p>'
+                        '</div>',
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    r = procesar_respuesta_historica(resp.get("data"), cuit_input)
+                    nombre_bcra = r.get("Nombre", "")
+                    periodos    = r.get("periodos", [])
+
+                    # ── Header ──────────────────────────────────────────────
+                    with st.container(border=True):
+                        if nombre_bcra:
+                            st.markdown(
+                                f'<p style="font-size:22px;font-weight:700;color:#1d1d1f;'
+                                f'letter-spacing:-0.02em;margin:0 0 2px 0;">{nombre_bcra}</p>',
+                                unsafe_allow_html=True,
+                            )
+                        st.markdown(
+                            f'<p style="font-size:13px;color:#86868b;margin:0 0 16px 0;">'
+                            f'CUIT {cuit_input} · Últimos {len(periodos)} meses</p>',
+                            unsafe_allow_html=True,
+                        )
+
+                        if not periodos:
+                            st.markdown('<span class="b-sd">✓ Sin registros históricos</span>',
+                                        unsafe_allow_html=True)
+                        else:
+                            # ── Gráfico de evolución ────────────────────────
+                            st.markdown('<p class="sec-label">Evolución de situación crediticia</p>',
+                                        unsafe_allow_html=True)
+
+                            try:
+                                import plotly.graph_objects as go
+
+                                x_periodos   = [p["periodo_texto"] for p in periodos]
+                                y_sit_peor   = [p["sit_peor"] for p in periodos]
+                                y_monto      = [p["total_monto"] for p in periodos]
+
+                                # Color por situación
+                                sit_colors = {
+                                    0: "#c7c7cc", 1: "#1a7a1a", 2: "#e68a00",
+                                    3: "#cc5500", 4: "#cc0000", 5: "#7a0000",
+                                }
+                                bar_colors = [sit_colors.get(s, "#86868b") for s in y_sit_peor]
+
+                                fig = go.Figure()
+                                fig.add_trace(go.Bar(
+                                    x=x_periodos,
+                                    y=y_sit_peor,
+                                    marker_color=bar_colors,
+                                    text=[f"Sit. {s}" for s in y_sit_peor],
+                                    textposition="outside",
+                                    textfont_size=11,
+                                    hovertemplate=(
+                                        "<b>%{x}</b><br>"
+                                        "Peor situación: %{y}<br>"
+                                        "<extra></extra>"
+                                    ),
+                                ))
+
+                                # Línea de referencia en Sit. 1 (zona segura)
+                                fig.add_hline(
+                                    y=1.5, line_dash="dot", line_color="#1a7a1a",
+                                    opacity=0.4,
+                                    annotation_text="Zona segura (Sit. 1)",
+                                    annotation_position="top left",
+                                    annotation_font_size=10,
+                                    annotation_font_color="#1a7a1a",
+                                )
+
+                                fig.update_layout(
+                                    margin=dict(t=16, b=8, l=8, r=8),
+                                    height=280,
+                                    showlegend=False,
+                                    paper_bgcolor="rgba(0,0,0,0)",
+                                    plot_bgcolor="rgba(0,0,0,0)",
+                                    font_family="DM Sans",
+                                    yaxis=dict(
+                                        title="Situación",
+                                        range=[0, 5.8],
+                                        dtick=1,
+                                        showgrid=True,
+                                        gridcolor="#f0f0f0",
+                                        zeroline=False,
+                                    ),
+                                    xaxis=dict(
+                                        title="Período",
+                                        showgrid=False,
+                                        tickangle=-45,
+                                    ),
+                                )
+                                st.plotly_chart(fig, use_container_width=True,
+                                                config={"displayModeBar": False})
+
+                            except ImportError:
+                                st.bar_chart(
+                                    pd.DataFrame({
+                                        "Período": [p["periodo_texto"] for p in periodos],
+                                        "Sit. peor": [p["sit_peor"] for p in periodos],
+                                    }).set_index("Período"),
+                                    height=250,
+                                )
+
+                            # ── KPIs resumen ────────────────────────────────
+                            st.markdown("<br>", unsafe_allow_html=True)
+                            peor_global     = max(p["sit_peor"] for p in periodos) if periodos else 0
+                            meses_fuera_s1  = sum(1 for p in periodos if p["sit_peor"] > 1)
+                            monto_max       = max(p["total_monto"] for p in periodos) if periodos else 0
+
+                            k1, k2, k3, k4 = st.columns(4)
+                            for col, val, lbl, color in [
+                                (k1, len(periodos),      "Meses",         "#1d1d1f"),
+                                (k2, f"Sit. {peor_global}", "Peor situación", "#cc0000" if peor_global > 1 else "#1a7a1a"),
+                                (k3, meses_fuera_s1,     "Meses fuera Sit.1", "#cc0000" if meses_fuera_s1 > 0 else "#1a7a1a"),
+                                (k4, f"${monto_max:,.0f}","Deuda máxima",  "#1d1d1f"),
+                            ]:
+                                col.markdown(
+                                    f'<div class="kpi"><div class="n" style="color:{color}">{val}</div>'
+                                    f'<div class="l">{lbl}</div></div>',
+                                    unsafe_allow_html=True,
+                                )
+
+                            # ── Tabla detalle por período ────────────────────
+                            st.markdown("<br>", unsafe_allow_html=True)
+                            st.markdown('<p class="sec-label">Detalle por período</p>',
+                                        unsafe_allow_html=True)
+
+                            filas_tabla = []
+                            for p in reversed(periodos):  # más reciente primero
+                                for ent in p["entidades"]:
+                                    filas_tabla.append({
+                                        "Período":  p["periodo_texto"],
+                                        "Entidad":  ent["Entidad"],
+                                        "Sit.":     ent["Situacion"],
+                                        "Monto $":  ent["Monto"],
+                                    })
+                            if filas_tabla:
+                                df_hist = pd.DataFrame(filas_tabla)
+                                st.dataframe(df_hist, use_container_width=True,
+                                             hide_index=True, height=320)
+
+                                # Descargar Excel
+                                buf = io.BytesIO()
+                                df_hist.to_excel(buf, index=False)
+                                fname = f"historico_{cuit_input}_{datetime.now().strftime('%Y%m%d')}"
+                                st.download_button(
+                                    "⬇ Descargar detalle Excel",
+                                    data=buf.getvalue(),
+                                    file_name=f"{fname}.xlsx",
+                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                    use_container_width=True,
+                                )
+
+                    # ── Registrar y cobrar la consulta ─────────────────────
+                    registrar_evento_individual(
+                        usuario_id=usuario_actual["id"],
+                        cliente_id=usuario_actual["cliente_id"],
+                        resultado_cat="HISTORICA",
+                    )
+
+        else:
+            st.markdown("""
+            <div style="text-align:center;padding:60px 20px;color:#86868b;">
+                <div style="font-size:48px;margin-bottom:16px;">📊</div>
+                <p style="font-size:16px;font-weight:500;color:#1d1d1f;margin:0 0 8px 0;">Ingresá un CUIT para ver su historial</p>
+                <p style="font-size:14px;margin:0;">Vas a ver la evolución crediticia de los últimos 24 meses</p>
+            </div>
+            """, unsafe_allow_html=True)
+
+    st.markdown(FOOTER_HTML, unsafe_allow_html=True)
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # ROUTER
 # ══════════════════════════════════════════════════════════════════════════════
 
-# st.radio devuelve el label completo — mapeamos a función
 _router = {
     "Consulta individual": pagina_individual,
+    "Consulta histórica":  pagina_historica,
     "Carga masiva":        pagina_masiva,
     "Historial": pagina_historial,
     "Seguimiento mensual": lambda: render_seguimiento(usuario_actual),

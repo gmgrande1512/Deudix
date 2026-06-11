@@ -651,7 +651,8 @@ def render_admin(usuario_actual):
     <div style="margin-top:32px;padding:16px 24px;border-top:0.5px solid #e5e5ea;text-align:center;">
       <p style="color:#86868b;font-size:10px;margin:0;line-height:1.6;max-width:900px;display:inline-block;">
         <strong style="color:#1d1d1f;">Aviso:</strong>
-        Los datos provienen de fuentes públicas (BCRA y boletines oficiales).
+        Los datos provienen de la API pública del BCRA.
+        Este sitio es independiente del BCRA y no almacena datos personales.
         Nuestro sistema agrega valor mediante procesamiento y presentación, pero no modifica la información.
         El BCRA no avala ni certifica este servicio.
       </p>

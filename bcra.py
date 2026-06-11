@@ -74,6 +74,77 @@ def _consulta_curl(url: str, timeout: int = 20) -> dict:
         return {"ok": False, "error": f"{type(e).__name__}: {str(e)[:80]}"}
 
 
+def consultar_bcra_historico(cuit, intentos=3) -> dict:
+    """
+    Consulta la API BCRA histórica (últimos 24 meses) para un CUIT dado.
+    Endpoint: /centraldedeudores/v1.0/Deudas/Historicas/{CUIT}
+    """
+    cuit_limpio = str(cuit).replace("-", "").replace(" ", "").replace(".", "").strip()
+    url = f"{BASE_URL}/Historicas/{cuit_limpio}"
+
+    ultimo_error = ""
+    for intento in range(1, intentos + 1):
+        resultado = _consulta_curl(url)
+        if resultado.get("ok"):
+            return resultado
+        ultimo_error = resultado.get("error", "desconocido")
+        if "mantenimiento" in ultimo_error.lower():
+            return resultado
+        if resultado.get("retry"):
+            time.sleep(5 * intento)
+        elif intento < intentos:
+            time.sleep(2 * intento)
+    return {"ok": False, "error": ultimo_error}
+
+
+def procesar_respuesta_historica(data, cuit) -> dict:
+    """
+    Procesa la respuesta histórica en una lista de periodos con resumen.
+    Retorna {"CUIT":..., "Nombre":..., "periodos": [{periodo, entidades, sit_peor, ...}]}
+    """
+    nombre = extraer_nombre_api(data) if data else ""
+    base = {"CUIT": cuit, "Nombre": nombre, "periodos": []}
+    if data is None:
+        return base
+    results_raw = data.get("results", {})
+    if not isinstance(results_raw, dict):
+        return base
+    periodos_raw = results_raw.get("periodos", [])
+    if not periodos_raw:
+        return base
+
+    periodos = []
+    for p in periodos_raw:
+        periodo_id = str(p.get("periodo", ""))
+        entidades  = p.get("entidades", [])
+        sit_peor   = 0
+        total_monto = 0.0
+        detalle     = []
+        for ent in entidades:
+            sit   = int(ent.get("situacion", 0) or 0)
+            monto = float(ent.get("monto", 0) or 0)
+            detalle.append({
+                "Entidad":   ent.get("entidad", ""),
+                "Situacion": sit,
+                "Monto":     monto,
+            })
+            if sit > sit_peor:
+                sit_peor = sit
+            total_monto += monto
+        periodos.append({
+            "periodo":      periodo_id,
+            "periodo_texto": periodo_a_texto(periodo_id),
+            "sit_peor":     sit_peor,
+            "total_monto":  total_monto,
+            "cant_entidades": len(entidades),
+            "entidades":    detalle,
+        })
+
+    # Ordenar por periodo ascendente (más antiguo primero)
+    periodos.sort(key=lambda x: x["periodo"])
+    return {**base, "Nombre": nombre, "periodos": periodos}
+
+
 def consultar_bcra(cuit, intentos=3) -> dict:
     """
     Consulta la API BCRA para un CUIT dado.
