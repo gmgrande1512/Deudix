@@ -363,12 +363,14 @@ def pagina_individual():
                     resp = consultar_bcra(cuit_input)
 
                 if not resp["ok"]:
+                    _err_detalle = resp.get("error", "desconocido")
                     st.markdown(
                         '<div style="background:#fff8f0;border:1.5px solid #cc6600;border-radius:10px;padding:20px 24px;margin:8px 0;">'
                         '<p style="font-size:16px;font-weight:700;color:#cc6600;margin:0 0 6px 0;">⚠️ El BCRA no está disponible en este momento</p>'
                         '<p style="font-size:14px;color:#1d1d1f;margin:0 0 8px 0;">No pudimos conectarnos con la Central de Deudores del Banco Central.</p>'
                         '<p style="font-size:13px;color:#86868b;margin:0;">Esto suele ser temporal. Esperá unos segundos y volvé a intentar. '
                         'Si el problema persiste, el servicio del BCRA puede estar en mantenimiento.</p>'
+                        f'<p style="font-size:11px;color:#aeaeb2;margin:8px 0 0 0;font-family:monospace;">Detalle: {_err_detalle}</p>'
                         '</div>',
                         unsafe_allow_html=True,
                     )
