@@ -738,6 +738,38 @@ def get_mov_pendiente_por_ref(referencia_ext: str) -> dict | None:
 
 # ── Vigilados / Seguimiento ───────────────────────────────────────────────────
 
+def get_saldo(cliente_id: int) -> float:
+    """Devuelve el saldo disponible en USD. Crea registro si no existe."""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT saldo_usd FROM saldos WHERE cliente_id=?", (cliente_id,)
+    ).fetchone()
+    if not row:
+        conn.execute(
+            "INSERT OR IGNORE INTO saldos (cliente_id, saldo_usd) VALUES (?,0.0)",
+            (cliente_id,)
+        )
+        conn.commit()
+        conn.close()
+        return 0.0
+    conn.close()
+    return float(row["saldo_usd"])
+
+
+def get_consultas_disponibles(cliente_id: int) -> int:
+    """Cuantas consultas puede hacer el cliente con su saldo actual."""
+    saldo  = get_saldo(cliente_id)
+    precio = get_precio_cliente(cliente_id) or PRECIO_DEFAULT_USD
+    if precio <= 0:
+        return 0
+    return int(saldo / precio)
+
+
+def tiene_saldo(cliente_id: int, cantidad: int = 1) -> bool:
+    """True si el cliente tiene saldo para 'cantidad' consultas."""
+    return get_consultas_disponibles(cliente_id) >= cantidad
+
+
 def agregar_vigilado(cliente_id: int, usuario_id: int,
                      cuit: str, alias: str = "") -> tuple[bool, str]:
     cuit_limpio = cuit.replace("-","").replace(".","").strip()
@@ -754,40 +786,157 @@ def agregar_vigilado(cliente_id: int, usuario_id: int,
     finally:
         conn.close()
 
-def listar_vigilados(cliente_id: int) -> list:
-    conn = get_conn()
-    rows = conn.execute("""
-        SELECT v.*, 
-               (SELECT variacion FROM historial_vigilados
-                WHERE vigilado_id=v.id ORDER BY id DESC LIMIT 1) AS ultima_variacion,
-               (SELECT monto_sit1 + monto_riesgo FROM historial_vigilados
-                WHERE vigilado_id=v.id ORDER BY id DESC LIMIT 1) AS ultimo_total
+
+def agregar_vigilados_masivo(cliente_id: int, usuario_id: int,
+                              lista: list[dict]) -> tuple[int, int]:
+    """Alta masiva desde lista de dicts con claves 'cuit' y opcionalmente 'alias'."""
+    ok = err = 0
+    for item in lista:
+        cuit  = str(item.get("cuit","")).replace("-","").replace(".","").strip()
+        alias = str(item.get("alias","") or item.get("nombre","") or cuit).strip()
+        if not cuit:
+            err += 1; continue
+        r, _ = agregar_vigilado(cliente_id, usuario_id, cuit, alias)
+        if r: ok += 1
+        else: err += 1
+    return ok, err
+
+
+def listar_vigilados(cliente_id: int, solo_activos: bool = True) -> list:
+    conn  = get_conn()
+    where = "WHERE v.cliente_id=?" + (" AND v.activo=1" if solo_activos else "")
+    rows  = conn.execute(f"""
+        SELECT v.*,
+               h.periodo_bcra     AS ultimo_periodo,
+               h.monto_sit1       AS ultimo_sit1,
+               h.monto_riesgo     AS ultimo_riesgo,
+               h.variacion        AS ultima_variacion,
+               h.fecha_consulta   AS ultima_fecha
         FROM vigilados v
-        WHERE v.cliente_id=? AND v.activo=1
-        ORDER BY v.alias
+        LEFT JOIN historial_vigilados h
+               ON h.vigilado_id = v.id
+              AND h.id = (SELECT MAX(id) FROM historial_vigilados
+                          WHERE vigilado_id = v.id)
+        {where}
+        ORDER BY v.alias, v.cuit
     """, (cliente_id,)).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
-def eliminar_vigilado(vigilado_id: int, cliente_id: int) -> bool:
+
+def actualizar_umbral_vigilado(vigilado_id: int, cliente_id: int, umbral: float) -> bool:
+    """Actualiza el umbral pasa/no pasa de un CUIT vigilado."""
     conn = get_conn()
-    conn.execute(
-        "UPDATE vigilados SET activo=0 WHERE id=? AND cliente_id=?",
-        (vigilado_id, cliente_id)
-    )
+    ok   = conn.execute(
+        "UPDATE vigilados SET umbral_pct=? WHERE id=? AND cliente_id=?",
+        (umbral, vigilado_id, cliente_id)
+    ).rowcount > 0
     conn.commit()
     conn.close()
-    return True
+    return ok
 
-def get_historial_vigilado(vigilado_id: int, limite=12) -> list:
+
+def desactivar_vigilado(vigilado_id: int, cliente_id: int) -> bool:
+    conn = get_conn()
+    ok   = conn.execute(
+        "UPDATE vigilados SET activo=0 WHERE id=? AND cliente_id=?",
+        (vigilado_id, cliente_id)
+    ).rowcount > 0
+    conn.commit()
+    conn.close()
+    return ok
+
+# Alias para compatibilidad
+eliminar_vigilado = desactivar_vigilado
+
+
+def get_historial_vigilado(vigilado_id: int, limite: int = 24) -> list:
     conn = get_conn()
     rows = conn.execute("""
         SELECT * FROM historial_vigilados
         WHERE vigilado_id=?
-        ORDER BY id DESC LIMIT ?
+        ORDER BY fecha_consulta DESC
+        LIMIT ?
     """, (vigilado_id, limite)).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def registrar_resultado_seguimiento(vigilado_id: int, cliente_id: int,
+                                     usuario_id: int, resultado: dict,
+                                     costo: float) -> str:
+    """
+    Guarda el resultado del mes para un vigilado y calcula la variación.
+    Retorna el código de variación.
+    """
+    conn = get_conn()
+    prev = conn.execute("""
+        SELECT monto_sit1, monto_riesgo, sin_deuda
+        FROM historial_vigilados
+        WHERE vigilado_id=?
+        ORDER BY fecha_consulta DESC LIMIT 1
+    """, (vigilado_id,)).fetchone()
+
+    if resultado.get("error"):
+        conn.execute("""
+            INSERT INTO historial_vigilados
+                (vigilado_id, cliente_id, variacion, costo, error)
+            VALUES (?,?,'ERROR',?,?)
+        """, (vigilado_id, cliente_id, costo, resultado["error"][:200]))
+        conn.commit()
+        conn.close()
+        return "ERROR"
+
+    sit1    = resultado.get("Monto_Sit1", 0)
+    riesgo  = resultado.get("Monto_Riesgo", 0)
+    n_ent   = len(resultado.get("Entidades", []))
+    sin_d   = 1 if resultado.get("Sin_Deuda") else 0
+    periodo = resultado.get("Periodo", "")
+    sit_peor = max((e.get("Situacion", 0) for e in resultado.get("Entidades", [])), default=0)
+
+    if prev is None:
+        variacion = "NUEVO"
+        d_sit1 = d_riesgo = 0.0
+    elif sin_d and prev["sin_deuda"]:
+        variacion = "SIN_CAMBIO"
+        d_sit1 = d_riesgo = 0.0
+    elif sin_d and not prev["sin_deuda"]:
+        variacion = "BAJA"
+        d_sit1   = -float(prev["monto_sit1"])
+        d_riesgo = -float(prev["monto_riesgo"])
+    elif not sin_d and prev["sin_deuda"]:
+        variacion = "SUBE"
+        d_sit1   = sit1
+        d_riesgo = riesgo
+    else:
+        d_sit1   = sit1   - float(prev["monto_sit1"])
+        d_riesgo = riesgo - float(prev["monto_riesgo"])
+        total_delta = abs(d_sit1) + abs(d_riesgo)
+        if total_delta < 0.01:
+            variacion = "SIN_CAMBIO"
+        elif (d_sit1 + d_riesgo) > 0:
+            variacion = "SUBE"
+        else:
+            variacion = "BAJA"
+
+    conn.execute("""
+        INSERT INTO historial_vigilados
+            (vigilado_id, cliente_id, periodo_bcra, monto_sit1, monto_riesgo,
+             cant_entidades, situacion_peor, sin_deuda, variacion,
+             delta_sit1, delta_riesgo, costo)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+    """, (vigilado_id, cliente_id, periodo, sit1, riesgo,
+          n_ent, sit_peor, sin_d, variacion, d_sit1, d_riesgo, costo))
+
+    conn.execute("""
+        UPDATE vigilados SET ultima_consulta=datetime('now','localtime')
+        WHERE id=?
+    """, (vigilado_id,))
+
+    conn.commit()
+    conn.close()
+    return variacion
+
 
 def registrar_resultado_vigilado(vigilado_id: int, cliente_id: int,
                                   periodo: str, sit1: float, riesgo: float,
