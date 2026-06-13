@@ -292,8 +292,39 @@ FOOTER_HTML = """
 # PÁGINAS
 # ══════════════════════════════════════════════════════════════════════════════
 
+def fmt_ar(valor, decimales=2) -> str:
+    """
+    Formatea un número al estilo argentino: punto para miles, coma para decimales.
+    Ej: 1234567.89 → '1.234.567,89'  |  1500 → '1.500,00'
+    Aplica separador de miles solo cuando corresponde (cifras >= 1000).
+    """
+    try:
+        v = float(valor or 0)
+    except (ValueError, TypeError):
+        return str(valor)
+    # Formato US estándar: 1,234,567.89
+    s = f"{v:,.{decimales}f}"
+    # Intercambiar separadores: , ↔ .
+    s = s.replace(",", "§").replace(".", ",").replace("§", ".")
+    return s
+
+def fmt_pesos(valor, decimales=0) -> str:
+    """Monto en pesos con símbolo $ y formato argentino."""
+    return f"${fmt_ar(valor, decimales)}"
+
+def fmt_usd(valor, decimales=2) -> str:
+    """Monto en USD con formato argentino."""
+    return f"USD {fmt_ar(valor, decimales)}"
+
+def _es_cuenta_admin(usuario: dict) -> bool:
+    """La cuenta admin@deudix.com no requiere perfil completo ni TyC."""
+    return (usuario or {}).get("email", "").lower() == "admin@deudix.com"
+
 def _perfil_completo(cliente: dict) -> bool:
     """Devuelve True si los campos obligatorios del perfil están completos."""
+    # La cuenta admin nunca necesita perfil completo
+    if _es_cuenta_admin(usuario_actual):
+        return True
     obligatorios = ["nombre","cuit_empresa","domicilio","ciudad","provincia","telefono","email_empresa"]
     return all(bool(((cliente or {}).get(f) or "").strip()) for f in obligatorios)
 
@@ -315,6 +346,25 @@ def pagina_individual():
 
     st.markdown('<p class="page-title">Consulta individual</p>', unsafe_allow_html=True)
     st.markdown('<p class="page-sub">Consultá la situación crediticia de un CUIT en el BCRA</p>', unsafe_allow_html=True)
+
+    # Punto 2: confirmación de agregado a seguimiento (persiste tras rerun)
+    _recien = st.session_state.get("vigilado_recien_agregado")
+    if _recien:
+        st.markdown(
+            '<div style="background:#f0faf0;border:1.5px solid #1a7a1a;'
+            'border-radius:12px;padding:20px 24px;margin:8px 0 16px 0;text-align:center;">'
+            '<p style="font-size:20px;font-weight:700;color:#1a7a1a;margin:0 0 4px 0;">'
+            '✅ Agregado al seguimiento mensual</p>'
+            f'<p style="font-size:14px;color:#1a7a1a;margin:0;">'
+            f'El CUIT {_recien} ahora está siendo monitoreado. '
+            f'Vas a recibir alertas si su situación crediticia cambia mes a mes.</p>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+        if st.button("Continuar", type="primary", key="btn_continuar_vigilado"):
+            st.session_state.pop("vigilado_recien_agregado", None)
+            st.rerun()
+        st.stop()
 
     col_form, col_gap, col_result = st.columns([4, 1, 7])
 
@@ -411,9 +461,9 @@ def pagina_individual():
                             st.markdown("<br>", unsafe_allow_html=True)
                             m1, m2, m3 = st.columns(3)
                             total = r["Monto_Sit1"] + r["Monto_Riesgo"]
-                            m1.metric("Deuda normal",    f"${r['Monto_Sit1']:,.0f}")
-                            m2.metric("Deuda en riesgo", f"${r['Monto_Riesgo']:,.0f}")
-                            m3.metric("Total deuda",     f"${total:,.0f}")
+                            m1.metric("Deuda normal",    fmt_pesos(r['Monto_Sit1']))
+                            m2.metric("Deuda en riesgo", fmt_pesos(r['Monto_Riesgo']))
+                            m3.metric("Total deuda",     fmt_pesos(total))
 
                         # Detalle por entidad
                         if r.get("Entidades"):
@@ -421,6 +471,8 @@ def pagina_individual():
                             st.markdown('<p class="sec-label">Detalle por entidad financiera</p>', unsafe_allow_html=True)
                             df_ent = pd.DataFrame(r["Entidades"])
                             df_ent.columns = ["Entidad", "Sit.", "Monto $", "Días atraso"]
+                            # Formato argentino en columna Monto $
+                            df_ent["Monto $"] = df_ent["Monto $"].apply(lambda x: fmt_pesos(x))
                             # Color de situación
                             def color_sit(val):
                                 colores = {1:"#f0faf0", 2:"#fff8f0", 3:"#fff3e0", 4:"#fff0f0", 5:"#fce4e4"}
@@ -479,22 +531,10 @@ def pagina_individual():
                                 cuit_input, _alias,
                             )
                             if _ok:
-                                st.session_state[f"vigilado_ok_{cuit_input}"] = True
+                                st.session_state["vigilado_recien_agregado"] = cuit_input
                                 st.rerun()
                             else:
                                 st.error(f"No se pudo agregar: {_msg}")
-                        # Confirmación persistente
-                        if st.session_state.get(f"vigilado_ok_{cuit_input}"):
-                            st.markdown(
-                                '<div style="background:#f0faf0;border:1.5px solid #1a7a1a;'
-                                'border-radius:10px;padding:16px 20px;margin:8px 0;text-align:center;">'
-                                '<p style="font-size:18px;font-weight:700;color:#1a7a1a;margin:0 0 4px 0;">'
-                                '✅ CUIT agregado al seguimiento mensual</p>'
-                                '<p style="font-size:13px;color:#1a7a1a;margin:0;">'
-                                'Vas a recibir alertas si su situación crediticia cambia.</p>'
-                                '</div>',
-                                unsafe_allow_html=True,
-                            )
 
 
 
@@ -1086,7 +1126,7 @@ def pagina_historial():
     k1, k2, k3, k4 = st.columns(4)
     for col, val, lbl, color in [
         (k1, res["total_consultas"],        "Total casos",  "#1d1d1f"),
-        (k2, f"${res['total_costo']:,.2f}", "Facturado",    "#0066cc"),
+        (k2, fmt_pesos(res['total_costo'], 2), "Facturado",    "#0066cc"),
         (k3, res["mas_corridas"],           "Batch",        "#1d1d1f"),
         (k4, res["ind_total"],              "Individuales", "#1d1d1f"),
     ]:
@@ -1160,7 +1200,7 @@ def pagina_historial():
                 ["fecha_hora","usuario","total_casos","pasan","no_pasan","sin_deuda","errores","costo_total","umbral_usado"]
             ]
             df_m.columns = ["Fecha","Usuario","Casos","Pasan","No pasan","Sin deuda","Errores","Costo $","Umbral %"]
-            df_m["Costo $"] = df_m["Costo $"].apply(lambda x: f"${x:,.2f}")
+            df_m["Costo $"] = df_m["Costo $"].apply(lambda x: fmt_pesos(x, 2))
             st.dataframe(df_m, use_container_width=True, hide_index=True, height=220)
         else:
             st.markdown('<p style="color:#86868b;font-size:13px;">Sin corridas batch en este período.</p>', unsafe_allow_html=True)
@@ -1174,7 +1214,7 @@ def pagina_historial():
         if eventos["individuales"]:
             df_i = pd.DataFrame(eventos["individuales"])[["fecha_hora","usuario","resultado_cat","costo"]]
             df_i.columns = ["Fecha","Usuario","Resultado","Costo $"]
-            df_i["Costo $"] = df_i["Costo $"].apply(lambda x: f"${x:,.2f}")
+            df_i["Costo $"] = df_i["Costo $"].apply(lambda x: fmt_pesos(x, 2))
             st.dataframe(df_i, use_container_width=True, hide_index=True, height=220)
         else:
             st.markdown('<p style="color:#86868b;font-size:13px;">Sin consultas individuales en este período.</p>', unsafe_allow_html=True)
@@ -1220,7 +1260,7 @@ def pagina_estado_cuenta():
 
         s1.markdown(
             f'<div class="kpi"><div class="n" style="color:{color_saldo};">'
-            f'USD&nbsp;{saldo:,.2f}</div><div class="l">Saldo disponible</div></div>',
+            f'USD&nbsp;{fmt_ar(saldo)}</div><div class="l">Saldo disponible</div></div>',
             unsafe_allow_html=True,
         )
         s2.markdown(
@@ -1234,7 +1274,7 @@ def pagina_estado_cuenta():
             unsafe_allow_html=True,
         )
         s4.markdown(
-            f'<div class="kpi"><div class="n">USD&nbsp;{resumen["tot_consumido"]:,.2f}</div>'
+            f'<div class="kpi"><div class="n">USD&nbsp;{fmt_ar(resumen["tot_consumido"])}</div>'
             f'<div class="l">Consumido histórico</div></div>',
             unsafe_allow_html=True,
         )
@@ -1377,7 +1417,7 @@ def pagina_estado_cuenta():
         res = get_resumen_mes(cliente_id=cliente_id, anio=now.year, mes=now.month)
         f1, f2, f3 = st.columns(3)
         f1.metric("Consultas del mes", res["total_consultas"])
-        f2.metric("Facturado",         f"USD {res['total_costo']:,.2f}")
+        f2.metric("Facturado",         f"USD {fmt_ar(res["total_costo"])}")
         f3.metric("Batch realizados",  res["mas_corridas"])
 
     # ── Historial de movimientos ──────────────────────────────────────────────
@@ -1666,7 +1706,7 @@ def pagina_historica():
                                 (k1, len(periodos),      "Meses",         "#1d1d1f"),
                                 (k2, f"Sit. {peor_global}", "Peor situación", "#cc0000" if peor_global > 1 else "#1a7a1a"),
                                 (k3, meses_fuera_s1,     "Meses fuera Sit.1", "#cc0000" if meses_fuera_s1 > 0 else "#1a7a1a"),
-                                (k4, f"${monto_max:,.0f}","Deuda máxima",  "#1d1d1f"),
+                                (k4, fmt_pesos(monto_max),"Deuda máxima",  "#1d1d1f"),
                             ]:
                                 col.markdown(
                                     f'<div class="kpi"><div class="n" style="color:{color}">{val}</div>'
@@ -1690,10 +1730,13 @@ def pagina_historica():
                                     })
                             if filas_tabla:
                                 df_hist = pd.DataFrame(filas_tabla)
-                                st.dataframe(df_hist, use_container_width=True,
+                                # Display con formato argentino, Excel queda numérico
+                                df_hist_display = df_hist.copy()
+                                df_hist_display["Monto $"] = df_hist_display["Monto $"].apply(lambda x: fmt_pesos(x))
+                                st.dataframe(df_hist_display, use_container_width=True,
                                              hide_index=True, height=320)
 
-                                # Descargar Excel
+                                # Descargar Excel (con valores numéricos para poder operar)
                                 buf = io.BytesIO()
                                 df_hist.to_excel(buf, index=False)
                                 fname = f"historico_{cuit_input}_{datetime.now().strftime('%Y%m%d')}"

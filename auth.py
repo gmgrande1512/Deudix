@@ -143,9 +143,10 @@ def login_screen():
                 return
             usuario = usuario_raw
             actualizar_ultimo_acceso(usuario["id"])
+            _es_admin_login = usuario.get("email","").lower() == "admin@deudix.com"
             st.session_state["usuario"]         = usuario
             st.session_state["logueado"]        = True
-            st.session_state["tyc_pendiente"]   = not usuario_acepto_tyc(usuario["id"])
+            st.session_state["tyc_pendiente"]   = False if _es_admin_login else not usuario_acepto_tyc(usuario["id"])
             st.query_params["sid"] = usuario["email"]
             st.rerun()
 
@@ -243,6 +244,13 @@ def require_login():
         st.stop()
 
     usuario = st.session_state["usuario"]
+
+    # La cuenta admin@deudix.com no requiere aceptar TyC
+    _es_admin = usuario.get("email", "").lower() == "admin@deudix.com"
+
+    if _es_admin:
+        st.session_state["tyc_pendiente"] = False
+        return usuario
 
     if st.session_state.get("tyc_pendiente", False):
         tyc_screen(usuario)
