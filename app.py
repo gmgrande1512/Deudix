@@ -588,8 +588,8 @@ def pagina_masiva():
     st.markdown('<p class="page-title">Carga masiva</p>', unsafe_allow_html=True)
     st.markdown('<p class="page-sub">Procesá un archivo Excel con múltiples CUITs en un solo paso</p>', unsafe_allow_html=True)
 
-    if "procesando" not in st.session_state:
-        st.session_state["procesando"] = False
+    if "mas_procesando" not in st.session_state:
+        st.session_state["mas_procesando"] = False
 
     # ── Subida de archivo ──────────────────────────────────────────────────────
     import os as _os
@@ -698,34 +698,76 @@ def pagina_masiva():
                 delay_seg = {"0.5s — Rápido": 0.5, "1.3s — Normal": 1.3, "2.0s — Seguro": 2.0}[delay_label]
 
 
-    # ── Worker de fondo ────────────────────────────────────────────────────────
-    # El procesamiento corre en un thread separado.
-    # La UI solo lee session_state, asi el usuario puede navegar sin interrumpir.
+    # ── Procesamiento incremental (sin threads) ────────────────────────────────
+    # Los threads daemon NO pueden escribir en st.session_state en Streamlit Cloud.
+    # Por eso procesamos en lotes dentro del hilo principal, guardando estado
+    # entre reruns. Cada rerun procesa CUITS_POR_LOTE y se auto-refresca.
 
-    def _worker(filas, cuit_col, nombre_col, capital_col, incluir_capital,
-                delay_seg, umbral, nombre_archivo, gen_excel, gen_pdf,
-                usuario_id, cliente_id):
-        resultados = []
-        log_msgs   = []
+    CUITS_POR_LOTE = 3  # cuántos CUITs procesar antes de refrescar la pantalla
+
+    # ── Botones de control ─────────────────────────────────────────────────────
+    procesando_ahora = st.session_state.get("mas_procesando", False)
+    bc1, bc2, bc3 = st.columns([3, 1, 8])
+    with bc1:
+        btn_proc = st.button(
+            "Iniciar procesamiento", use_container_width=True,
+            type="primary", key="btn_proc_v2",
+            disabled=procesando_ahora,
+        )
+    with bc2:
+        btn_cancel = st.button("Cancelar", key="btn_cancel_v2",
+                               use_container_width=True, type="secondary",
+                               disabled=not procesando_ahora)
+
+    if btn_cancel:
+        st.session_state["mas_cancelar"] = True
+
+    if btn_proc:
+        # Inicializar estado del procesamiento
+        st.session_state["mas_procesando"]  = True
+        st.session_state["mas_cancelar"]    = False
+        st.session_state["mas_filas"]       = df_agrupado.to_dict("records")
+        st.session_state["mas_idx"]         = 0
+        st.session_state["mas_resultados"]  = []
+        st.session_state["mas_log"]         = []
+        st.session_state["mas_cfg"] = {
+            "cuit_col": cuit_col, "nombre_col": nombre_col, "capital_col": capital_col,
+            "incluir_capital": incluir_capital, "delay_seg": delay_seg,
+            "umbral": umbral, "nombre_archivo": nombre_archivo,
+            "gen_excel": gen_excel_chk, "gen_pdf": gen_pdf_chk,
+        }
+        # Limpiar resultados anteriores
+        st.session_state.pop("resultados", None)
+        st.session_state.pop("log_msgs", None)
+        st.rerun()
+
+    # ── Loop de procesamiento por lotes ────────────────────────────────────────
+    if procesando_ahora:
+        filas    = st.session_state.get("mas_filas", [])
+        idx      = st.session_state.get("mas_idx", 0)
+        cfg      = st.session_state.get("mas_cfg", {})
+        resultados = st.session_state.get("mas_resultados", [])
+        log_msgs   = st.session_state.get("mas_log", [])
         total      = len(filas)
 
-        for idx_r, row in enumerate(filas):
-            if st.session_state.get("cancelar"):
-                hora_c = datetime.now().strftime("%H:%M:%S")
-                log_msgs.append(
-                    f'<span style="color:#ff9500">[{hora_c}] '
-                    f'cancelado en {idx_r+1}/{total}</span>'
-                )
-                break
+        cancelado = st.session_state.get("mas_cancelar", False)
 
-            cuit     = str(row[cuit_col]).replace(".0", "").strip()
-            nombre   = str(row[nombre_col]).strip() if nombre_col else ""
-            cap_val  = row.get(capital_col)
-            capital  = (float(cap_val)
-                        if (capital_col and incluir_capital
-                            and cap_val is not None
-                            and str(cap_val) not in ("nan", ""))
-                        else None)
+        # Procesar un lote
+        procesados_lote = 0
+        while idx < total and procesados_lote < CUITS_POR_LOTE and not cancelado:
+            row = filas[idx]
+            cc  = cfg["cuit_col"]
+            nc  = cfg["nombre_col"]
+            capc = cfg["capital_col"]
+
+            cuit    = str(row[cc]).replace(".0", "").strip()
+            nombre  = str(row[nc]).strip() if nc else ""
+            cap_val = row.get(capc)
+            capital = (float(cap_val)
+                       if (capc and cfg["incluir_capital"]
+                           and cap_val is not None
+                           and str(cap_val) not in ("nan", ""))
+                       else None)
             cant_ops = int(row.get("Cant_Operaciones", 1))
 
             resp = consultar_bcra(cuit)
@@ -738,8 +780,7 @@ def pagina_masiva():
                 estado_log = "sin deuda" if r.get("Sin_Deuda") else "con deuda"
                 log_msgs.append(
                     f'<span style="color:#aaffaa">[{hora}] {cuit} '
-                    f'· {estado_log} '
-                    f'· {len(r.get("Entidades", []))} entidades</span>'
+                    f'· {estado_log} · {len(r.get("Entidades", []))} entidades</span>'
                 )
             else:
                 resultados.append({
@@ -753,120 +794,69 @@ def pagina_masiva():
                     f'error · {cuit} · {resp["error"][:50]}</span>'
                 )
 
-            st.session_state["_worker_progreso"] = {
-                "procesados": idx_r + 1,
-                "total":      total,
-                "log_msgs":   list(log_msgs[-50:]),
-            }
-            time.sleep(delay_seg)
+            idx += 1
+            procesados_lote += 1
+            if cfg["delay_seg"] and idx < total:
+                time.sleep(cfg["delay_seg"])
 
-        # Reintentar errores
-        if not st.session_state.get("cancelar"):
-            errores_idx = [i for i, r in enumerate(resultados) if r.get("error")]
-            if errores_idx:
-                time.sleep(3)
-                for i in errores_idx:
-                    r     = resultados[i]
-                    resp2 = consultar_bcra(r["CUIT"])
-                    if resp2["ok"]:
-                        nuevo = procesar_respuesta(
-                            resp2.get("data"), r["CUIT"],
-                            r.get("Nombre", ""), r.get("Capital")
-                        )
-                        nuevo["Cant_Operaciones"] = r.get("Cant_Operaciones", 1)
-                        resultados[i] = nuevo
-                    time.sleep(2)
+        # Guardar progreso
+        st.session_state["mas_idx"]        = idx
+        st.session_state["mas_resultados"] = resultados
+        st.session_state["mas_log"]        = log_msgs
 
-        # Registrar en DB
-        try:
-            registrar_evento_masivo(
-                usuario_id=usuario_id,
-                cliente_id=cliente_id,
-                resultados=resultados,
-                umbral=umbral,
-            )
-        except Exception:
-            pass
+        # ¿Terminó o se canceló?
+        if idx >= total or cancelado:
+            if cancelado:
+                hora_c = datetime.now().strftime("%H:%M:%S")
+                log_msgs.append(
+                    f'<span style="color:#ff9500">[{hora_c}] '
+                    f'cancelado en {idx}/{total}</span>'
+                )
 
-        # Escribir resultado final en session_state
-        st.session_state.update({
-            "procesando":       False,
-            "resultados":       resultados,
-            "umbral_mas_res":   umbral,
-            "log_msgs":         log_msgs,
-            "nombre_archivo":   nombre_archivo,
-            "gen_excel":        gen_excel,
-            "gen_pdf":          gen_pdf,
-            "_worker_progreso": None,
-        })
+            # Registrar en DB y cobrar
+            try:
+                registrar_evento_masivo(
+                    usuario_id=usuario_actual["id"],
+                    cliente_id=usuario_actual["cliente_id"],
+                    resultados=resultados,
+                    umbral=cfg["umbral"],
+                )
+            except Exception:
+                pass
 
-    # ── Botones de control ─────────────────────────────────────────────────────
-    procesando_ahora = st.session_state.get("procesando", False)
-    bc1, bc2, bc3 = st.columns([3, 1, 8])
-    with bc1:
-        btn_proc = st.button(
-            "Iniciar procesamiento", use_container_width=True,
-            type="primary", key="btn_proc_v2",
-            disabled=procesando_ahora,
-        )
-    with bc2:
-        btn_cancel = st.button("Cancelar", key="btn_cancel_v2", use_container_width=True, type="secondary")
+            # Persistir resultado final para la sección de Resultados
+            st.session_state["resultados"]      = resultados
+            st.session_state["umbral_mas_res"]  = cfg["umbral"]
+            st.session_state["log_msgs"]        = log_msgs
+            st.session_state["nombre_archivo"]  = cfg["nombre_archivo"]
+            st.session_state["gen_excel"]       = cfg["gen_excel"]
+            st.session_state["gen_pdf"]         = cfg["gen_pdf"]
 
-    if btn_cancel:
-        st.session_state["cancelar"]   = True
-        st.session_state["procesando"] = False
-        st.rerun()
+            # Limpiar estado de procesamiento
+            st.session_state["mas_procesando"] = False
+            for k in ("mas_filas", "mas_idx", "mas_resultados", "mas_log", "mas_cfg", "mas_cancelar"):
+                st.session_state.pop(k, None)
+            st.rerun()
 
-    if btn_proc:
-        st.session_state["cancelar"]         = False
-        st.session_state["procesando"]       = True
-        st.session_state["_worker_progreso"] = {
-            "procesados": 0, "total": total_cuits, "log_msgs": []
-        }
-        for k in ("resultados", "log_msgs"):
-            st.session_state.pop(k, None)
-
-        import threading
-        _t = threading.Thread(
-            target=_worker,
-            args=(
-                df_agrupado.to_dict("records"),
-                cuit_col, nombre_col, capital_col,
-                incluir_capital, delay_seg, umbral, nombre_archivo,
-                gen_excel_chk, gen_pdf_chk,
-                usuario_actual["id"], usuario_actual["cliente_id"],
-            ),
-            daemon=True,
-        )
-        _t.start()
-        st.rerun()
-
-    # ── Panel de progreso en vivo ──────────────────────────────────────────────
-    progreso = st.session_state.get("_worker_progreso")
-    if procesando_ahora and progreso:
-        procesados = progreso.get("procesados", 0)
-        total_w    = progreso.get("total", total_cuits)
-        pct        = int(procesados / total_w * 100) if total_w else 0
-        log_live   = progreso.get("log_msgs", [])
-
-        st.markdown(
-            f'<p style="text-align:center;color:#86868b;font-size:13px;margin:8px 0;">'
-            f'Procesando {procesados} de {total_w} &nbsp;·&nbsp; {pct}%</p>',
-            unsafe_allow_html=True,
-        )
-        st.progress(pct / 100)
-        if log_live:
+        else:
+            # Mostrar progreso y refrescar para el siguiente lote
+            pct = int(idx / total * 100) if total else 0
             st.markdown(
-                f'<div class="log"><div class="logh">procesando en segundo plano '
-                f'— {procesados}/{total_w}</div>'
-                f'{"<br>".join(log_live[-20:])}</div>',
+                f'<p style="text-align:center;color:#86868b;font-size:13px;margin:8px 0;">'
+                f'Procesando {idx} de {total} &nbsp;·&nbsp; {pct}%</p>',
                 unsafe_allow_html=True,
             )
-        # Auto-refresh mientras corre
-        time.sleep(1.5)
-        st.rerun()
+            st.progress(pct / 100)
+            if log_msgs:
+                st.markdown(
+                    f'<div class="log"><div class="logh">procesando '
+                    f'— {idx}/{total}</div>'
+                    f'{"<br>".join(log_msgs[-20:])}</div>',
+                    unsafe_allow_html=True,
+                )
+            st.rerun()
 
-    # Log final (cuando ya termino)
+    # Log final (cuando ya terminó)
     if "log_msgs" in st.session_state and not procesando_ahora:
         msgs = st.session_state["log_msgs"]
         st.markdown(
