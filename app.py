@@ -408,29 +408,62 @@ def pagina_individual():
                 )
 
     with col_result:
+        # Si se presionó consultar, ejecutar y guardar en session_state
         if btn_consultar:
             if not cuit_input.strip():
+                st.session_state.pop("ind_resultado", None)
                 st.warning("Ingresá un CUIT válido")
             else:
                 with st.spinner("Consultando BCRA…"):
                     resp = consultar_bcra(cuit_input)
-
                 if not resp["ok"]:
-                    _err_detalle = resp.get("error", "desconocido")
-                    st.markdown(
-                        '<div style="background:#fff8f0;border:1.5px solid #cc6600;border-radius:10px;padding:20px 24px;margin:8px 0;">'
-                        '<p style="font-size:16px;font-weight:700;color:#cc6600;margin:0 0 6px 0;">⚠️ El BCRA no está disponible en este momento</p>'
-                        '<p style="font-size:14px;color:#1d1d1f;margin:0 0 8px 0;">No pudimos conectarnos con la Central de Deudores del Banco Central.</p>'
-                        '<p style="font-size:13px;color:#86868b;margin:0;">Esto suele ser temporal. Esperá unos segundos y volvé a intentar. '
-                        'Si el problema persiste, el servicio del BCRA puede estar en mantenimiento.</p>'
-                        f'<p style="font-size:11px;color:#aeaeb2;margin:8px 0 0 0;font-family:monospace;">Detalle: {_err_detalle}</p>'
-                        '</div>',
-                        unsafe_allow_html=True,
-                    )
-                    if st.button("Reintentar", type="primary", key="btn_retry_bcra"):
-                        st.rerun()
+                    st.session_state["ind_resultado"] = {"error": resp.get("error", "desconocido"),
+                                                          "cuit": cuit_input}
                 else:
-                    r           = procesar_respuesta(resp.get("data"), cuit_input)
+                    r = procesar_respuesta(resp.get("data"), cuit_input)
+                    st.session_state["ind_resultado"] = {
+                        "ok": True, "cuit": cuit_input, "r": r,
+                        "umbral": umbral_ind,
+                    }
+                    # Cobrar la consulta una sola vez (al consultar, no al revisar)
+                    try:
+                        registrar_evento_individual(
+                            usuario_id=usuario_actual["id"],
+                            cliente_id=usuario_actual["cliente_id"],
+                            resultado_cat=calcular_pasa(r["Monto_Sit1"], r["Monto_Riesgo"], umbral_ind)[1],
+                        )
+                    except Exception:
+                        pass
+
+        # Mostrar el resultado guardado (persiste entre reruns)
+        _ind = st.session_state.get("ind_resultado")
+        if not _ind:
+            st.markdown("""
+            <div style="text-align:center;padding:60px 20px;color:#86868b;">
+                <div style="font-size:48px;margin-bottom:16px;">🔍</div>
+                <p style="font-size:16px;font-weight:500;color:#1d1d1f;margin:0 0 8px 0;">Ingresá un CUIT para consultar</p>
+                <p style="font-size:14px;margin:0;">Vas a ver la situación crediticia actual en el BCRA</p>
+            </div>
+            """, unsafe_allow_html=True)
+        elif _ind.get("error"):
+            _err_detalle = _ind["error"]
+            st.markdown(
+                '<div style="background:#fff8f0;border:1.5px solid #cc6600;border-radius:10px;padding:20px 24px;margin:8px 0;">'
+                '<p style="font-size:16px;font-weight:700;color:#cc6600;margin:0 0 6px 0;">⚠️ El BCRA no está disponible en este momento</p>'
+                '<p style="font-size:14px;color:#1d1d1f;margin:0 0 8px 0;">No pudimos conectarnos con la Central de Deudores del Banco Central.</p>'
+                '<p style="font-size:13px;color:#86868b;margin:0;">Esto suele ser temporal. Esperá unos segundos y volvé a intentar. '
+                'Si el problema persiste, el servicio del BCRA puede estar en mantenimiento.</p>'
+                f'<p style="font-size:11px;color:#aeaeb2;margin:8px 0 0 0;font-family:monospace;">Detalle: {_err_detalle}</p>'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+            if st.button("Reintentar", type="primary", key="btn_retry_bcra"):
+                st.session_state.pop("ind_resultado", None)
+                st.rerun()
+        else:
+                    cuit_input  = _ind["cuit"]
+                    r           = _ind["r"]
+                    umbral_ind  = _ind.get("umbral", umbral_ind)
                     ratio, res  = calcular_pasa(r["Monto_Sit1"], r["Monto_Riesgo"], umbral_ind)
                     nombre_bcra = r.get("Nombre", "")
                     periodo_txt = periodo_a_texto(r.get("Periodo","")) if r.get("Periodo") else ""
@@ -549,22 +582,6 @@ def pagina_individual():
                             f'<p style="font-size:11px;color:#86868b;margin-top:6px;text-align:center;">Clic en 🟡 para Street View</p>',
                             unsafe_allow_html=True,
                         )
-
-                    # Registrar en DB
-                    registrar_evento_individual(
-                        usuario_id=usuario_actual["id"],
-                        cliente_id=usuario_actual["cliente_id"],
-                        resultado_cat="SIN DEUDA" if r.get("Sin_Deuda") else res,
-                    )
-        else:
-            # Estado vacío — instrucciones
-            st.markdown("""
-            <div style="text-align:center;padding:60px 20px;color:#86868b;">
-                <div style="font-size:48px;margin-bottom:16px;">🔍</div>
-                <p style="font-size:16px;font-weight:500;color:#1d1d1f;margin:0 0 8px 0;">Ingresá un CUIT para consultar</p>
-                <p style="font-size:14px;margin:0;">El resultado aparecerá aquí en segundos</p>
-            </div>
-            """, unsafe_allow_html=True)
 
     st.markdown(FOOTER_HTML, unsafe_allow_html=True)
 
@@ -1533,6 +1550,26 @@ def pagina_historica():
     st.markdown('<p class="page-title">Consulta histórica</p>', unsafe_allow_html=True)
     st.markdown('<p class="page-sub">Evolución crediticia de un CUIT en los últimos 24 meses</p>', unsafe_allow_html=True)
 
+    # Confirmación de agregado a seguimiento (persiste tras rerun)
+    _recien_h = st.session_state.get("vigilado_recien_agregado")
+    if _recien_h:
+        st.markdown(
+            '<div style="background:#f0faf0;border:1.5px solid #1a7a1a;'
+            'border-radius:12px;padding:20px 24px;margin:8px 0 16px 0;text-align:center;">'
+            '<p style="font-size:20px;font-weight:700;color:#1a7a1a;margin:0 0 4px 0;">'
+            '✅ Agregado al seguimiento mensual</p>'
+            f'<p style="font-size:14px;color:#1a7a1a;margin:0;">'
+            f'El CUIT {_recien_h} ahora está siendo monitoreado. '
+            f'Vas a recibir alertas si su situación crediticia cambia mes a mes.</p>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+        if st.button("Continuar", type="primary", key="btn_continuar_vigilado_hist"):
+            st.session_state.pop("vigilado_recien_agregado", None)
+            st.session_state.pop("_volver_a", None)
+            st.rerun()
+        st.stop()
+
     col_form, col_gap, col_result = st.columns([4, 1, 7])
 
     with col_form:
@@ -1569,25 +1606,55 @@ def pagina_historica():
                 )
 
     with col_result:
+        # Ejecutar consulta y persistir en session_state
         if btn_consultar:
             if not cuit_input.strip():
+                st.session_state.pop("hist_resultado", None)
                 st.warning("Ingresá un CUIT válido")
             else:
                 with st.spinner("Consultando historial BCRA…"):
                     resp = consultar_bcra_historico(cuit_input)
-
                 if not resp["ok"]:
-                    _err_detalle = resp.get("error", "desconocido")
-                    st.markdown(
-                        '<div style="background:#fff8f0;border:1.5px solid #cc6600;border-radius:10px;padding:20px 24px;margin:8px 0;">'
-                        '<p style="font-size:16px;font-weight:700;color:#cc6600;margin:0 0 6px 0;">⚠️ El BCRA no está disponible en este momento</p>'
-                        '<p style="font-size:14px;color:#1d1d1f;margin:0 0 8px 0;">No pudimos conectarnos con la Central de Deudores.</p>'
-                        f'<p style="font-size:11px;color:#aeaeb2;margin:8px 0 0 0;font-family:monospace;">Detalle: {_err_detalle}</p>'
-                        '</div>',
-                        unsafe_allow_html=True,
-                    )
+                    st.session_state["hist_resultado"] = {"error": resp.get("error", "desconocido"),
+                                                          "cuit": cuit_input}
                 else:
                     r = procesar_respuesta_historica(resp.get("data"), cuit_input)
+                    st.session_state["hist_resultado"] = {"ok": True, "cuit": cuit_input, "r": r}
+                    # Cobrar una sola vez al consultar
+                    try:
+                        registrar_evento_individual(
+                            usuario_id=usuario_actual["id"],
+                            cliente_id=usuario_actual["cliente_id"],
+                            resultado_cat="HISTORICA",
+                        )
+                    except Exception:
+                        pass
+
+        _hist = st.session_state.get("hist_resultado")
+        if not _hist:
+            st.markdown("""
+            <div style="text-align:center;padding:60px 20px;color:#86868b;">
+                <div style="font-size:48px;margin-bottom:16px;">📊</div>
+                <p style="font-size:16px;font-weight:500;color:#1d1d1f;margin:0 0 8px 0;">Ingresá un CUIT para ver su historial</p>
+                <p style="font-size:14px;margin:0;">Vas a ver la evolución crediticia de los últimos 24 meses</p>
+            </div>
+            """, unsafe_allow_html=True)
+        elif _hist.get("error"):
+            _err_detalle = _hist["error"]
+            st.markdown(
+                '<div style="background:#fff8f0;border:1.5px solid #cc6600;border-radius:10px;padding:20px 24px;margin:8px 0;">'
+                '<p style="font-size:16px;font-weight:700;color:#cc6600;margin:0 0 6px 0;">⚠️ El BCRA no está disponible en este momento</p>'
+                '<p style="font-size:14px;color:#1d1d1f;margin:0 0 8px 0;">No pudimos conectarnos con la Central de Deudores.</p>'
+                f'<p style="font-size:11px;color:#aeaeb2;margin:8px 0 0 0;font-family:monospace;">Detalle: {_err_detalle}</p>'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+            if st.button("Reintentar", type="primary", key="btn_retry_hist"):
+                st.session_state.pop("hist_resultado", None)
+                st.rerun()
+        else:
+                    cuit_input  = _hist["cuit"]
+                    r           = _hist["r"]
                     nombre_bcra = r.get("Nombre", "")
                     periodos    = r.get("periodos", [])
 
@@ -1738,21 +1805,40 @@ def pagina_historica():
                                     use_container_width=True,
                                 )
 
-                    # ── Registrar y cobrar la consulta ─────────────────────
-                    registrar_evento_individual(
-                        usuario_id=usuario_actual["id"],
-                        cliente_id=usuario_actual["cliente_id"],
-                        resultado_cat="HISTORICA",
+                    # ── Vigilancia mensual ────────────────────────────────────
+                    st.markdown('<hr class="divider">', unsafe_allow_html=True)
+                    from database import agregar_vigilado, listar_vigilados
+                    _ya_vigilado = any(
+                        v["cuit"] == cuit_input.replace("-","").replace(".","").strip()
+                        for v in listar_vigilados(usuario_actual["cliente_id"])
                     )
-
-        else:
-            st.markdown("""
-            <div style="text-align:center;padding:60px 20px;color:#86868b;">
-                <div style="font-size:48px;margin-bottom:16px;">📊</div>
-                <p style="font-size:16px;font-weight:500;color:#1d1d1f;margin:0 0 8px 0;">Ingresá un CUIT para ver su historial</p>
-                <p style="font-size:14px;margin:0;">Vas a ver la evolución crediticia de los últimos 24 meses</p>
-            </div>
-            """, unsafe_allow_html=True)
+                    if _ya_vigilado:
+                        st.markdown(
+                            '<div style="background:#e8f4ff;border:1.5px solid #0066cc;'
+                            'border-radius:10px;padding:14px 18px;margin:4px 0;">'
+                            '<p style="font-size:16px;font-weight:700;color:#0066cc;margin:0;">'
+                            '👁 En seguimiento mensual</p>'
+                            '<p style="font-size:13px;color:#0066cc;margin:4px 0 0 0;font-weight:400;">'
+                            'Este CUIT está siendo monitoreado. Recibirás alertas si su situación cambia.</p>'
+                            '</div>',
+                            unsafe_allow_html=True,
+                        )
+                    else:
+                        if st.button("👁 Agregar al seguimiento mensual",
+                                     key=f"btn_vigilar_hist_{cuit_input}",
+                                     use_container_width=True):
+                            _alias = nombre_bcra or cuit_input
+                            _ok, _msg = agregar_vigilado(
+                                usuario_actual["cliente_id"],
+                                usuario_actual["id"],
+                                cuit_input, _alias,
+                            )
+                            if _ok:
+                                st.session_state["vigilado_recien_agregado"] = cuit_input
+                                st.session_state["_volver_a"] = "historica"
+                                st.rerun()
+                            else:
+                                st.error(f"No se pudo agregar: {_msg}")
 
     st.markdown(FOOTER_HTML, unsafe_allow_html=True)
 
