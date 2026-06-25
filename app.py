@@ -769,6 +769,23 @@ def pagina_masiva():
 
         cancelado = st.session_state.get("mas_cancelar", False)
 
+        # ── Dibujar la barra ANTES de procesar (si no, el rerun la borra) ──────
+        pct_actual = int(idx / total * 100) if total else 0
+        with st.container():
+            st.markdown(
+                f'<p style="text-align:center;color:#0066cc;font-size:14px;font-weight:600;margin:12px 0 8px 0;">'
+                f'⏳ Procesando {idx} de {total} &nbsp;·&nbsp; {pct_actual}%</p>',
+                unsafe_allow_html=True,
+            )
+            st.progress(pct_actual / 100)
+            if log_msgs:
+                st.markdown(
+                    f'<div class="log"><div class="logh">procesando '
+                    f'— {idx}/{total}</div>'
+                    f'{"<br>".join(log_msgs[-20:])}</div>',
+                    unsafe_allow_html=True,
+                )
+
         # Procesar un lote
         procesados_lote = 0
         while idx < total and procesados_lote < CUITS_POR_LOTE and not cancelado:
@@ -856,21 +873,7 @@ def pagina_masiva():
             st.rerun()
 
         else:
-            # Mostrar progreso y refrescar para el siguiente lote
-            pct = int(idx / total * 100) if total else 0
-            st.markdown(
-                f'<p style="text-align:center;color:#86868b;font-size:13px;margin:8px 0;">'
-                f'Procesando {idx} de {total} &nbsp;·&nbsp; {pct}%</p>',
-                unsafe_allow_html=True,
-            )
-            st.progress(pct / 100)
-            if log_msgs:
-                st.markdown(
-                    f'<div class="log"><div class="logh">procesando '
-                    f'— {idx}/{total}</div>'
-                    f'{"<br>".join(log_msgs[-20:])}</div>',
-                    unsafe_allow_html=True,
-                )
+            # La barra ya se dibujó arriba. Refrescar para procesar el siguiente lote.
             st.rerun()
 
     # Log final (cuando ya terminó)
